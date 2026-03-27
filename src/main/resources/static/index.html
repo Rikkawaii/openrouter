@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenRouter - Admin Dashboard</title>
+    <!-- 全球极速 CDN 加载 Vue 和 Tailwind，零构建即可享受现代工程化之巅 -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+    <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #0f172a;
+            color: #f8fafc;
+            overflow-y: scroll;
+        }
+
+        .glass-panel {
+            background: rgba(30, 41, 59, 0.7);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .cyber-glow {
+            box-shadow: 0 0 20px rgba(52, 211, 153, 0.2);
+        }
+
+        [v-cloak] {
+            display: none;
+        }
+    </style>
+</head>
+
+<body class="min-h-screen p-6 md:p-12">
+    <div id="app" class="max-w-7xl mx-auto" v-cloak>
+        <header class="mb-12 flex justify-between items-center">
+            <div>
+                <h1
+                    class="text-4xl md:text-5xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-cyan-400 to-emerald-400 tracking-tight">
+                    OpenRouter Core</h1>
+                <p class="text-slate-400 mt-2 text-sm uppercase tracking-widest font-semibold drop-shadow-lg">Enterprise
+                    LLM Gateway</p>
+            </div>
+            <div class="flex items-center space-x-3 bg-slate-800/50 px-4 py-2 rounded-full border border-slate-700">
+                <span class="relative flex h-3 w-3">
+                    <span
+                        class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                    <span class="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
+                </span>
+                <span class="text-emerald-400 font-mono text-xs tracking-wider">LIVE SYNC : 2000MS</span>
+            </div>
+        </header>
+
+        <!-- Global Stats Row -->
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 mb-12">
+            <div class="glass-panel rounded-2xl p-6 transition transform hover:-translate-y-1">
+                <h3 class="text-slate-400 text-xs font-semibold uppercase tracking-wider flex items-center"><svg
+                        class="w-4 h-4 mr-2 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+                    </svg> Active Nodes</h3>
+                <div class="text-4xl font-bold mt-3 text-white font-mono">{{ stats.activeChannels }} <span
+                        class="text-xl text-slate-600">/ {{ stats.totalChannels }}</span></div>
+            </div>
+            <div class="glass-panel rounded-2xl p-6 transition transform hover:-translate-y-1">
+                <h3 class="text-slate-400 text-xs font-semibold uppercase tracking-wider flex items-center"><svg
+                        class="w-4 h-4 mr-2 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                    </svg> Avg Global TTFT</h3>
+                <div class="text-4xl font-bold mt-3 text-amber-400 font-mono">{{ stats.avgGlobalLatency }}<span
+                        class="text-lg text-slate-500 ml-1">ms</span></div>
+            </div>
+
+            <div class="glass-panel rounded-2xl p-6 transition transform hover:-translate-y-1 relative overflow-hidden">
+                <h3 class="text-slate-400 text-xs font-semibold uppercase tracking-wider flex items-center"><svg
+                        class="w-4 h-4 mr-2 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"></path>
+                    </svg> Global Tokens</h3>
+                <div class="text-4xl font-bold mt-3 text-purple-400 font-mono">{{ formatNumber(stats.globalTotalTokens) }}
+                </div>
+                <div class="mt-4 h-1.5 w-full bg-slate-800 rounded-full flex overflow-hidden">
+                    <div :style="{width: getRatio(stats.globalPromptTokens, stats.globalTotalTokens) + '%'}"
+                        class="bg-blue-400" title="Prompt"></div>
+                    <div :style="{width: getRatio(stats.globalCompletionTokens, stats.globalTotalTokens) + '%'}"
+                        class="bg-purple-400" title="Completion"></div>
+                </div>
+                <div class="flex justify-between mt-2 text-[10px] font-mono text-slate-500">
+                    <span>P: {{ formatNumber(stats.globalPromptTokens) }}</span>
+                    <span>C: {{ formatNumber(stats.globalCompletionTokens) }}</span>
+                </div>
+            </div>
+            <div class="glass-panel rounded-2xl p-6 transition transform hover:-translate-y-1">
+                <h3 class="text-slate-400 text-xs font-semibold uppercase tracking-wider flex items-center"><svg
+                        class="w-4 h-4 mr-2 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4"></path>
+                    </svg> Total Call Routing</h3>
+                <div class="text-4xl font-bold mt-3 text-cyan-400 font-mono">{{ formatNumber(stats.globalTotalCalls) }}
+                </div>
+            </div>
+        </div>
+
+        <!-- Channels Grid -->
+        <div class="flex justify-between items-end mb-6">
+            <div>
+                <h2 class="text-2xl font-bold text-slate-200">Channel Matrix</h2>
+                <div class="text-sm text-amber-500/80 font-mono mt-1 font-semibold tracking-wide">
+                    Live Score = BaseWeight - (Errors × 10) - (TTFT × 0.05) - (Streams × 5)
+                </div>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            <div v-for="ch in channels" :key="ch.id"
+                class="glass-panel rounded-3xl p-6 flex flex-col justify-between transition-all duration-500 hover:shadow-[0_0_30px_rgba(56,189,248,0.1)] relative overflow-hidden"
+                :class="{'opacity-50 grayscale': !ch.enabled}">
+                <!-- 呼吸光效背景 -->
+                <div v-if="ch.currentConcurrentCalls > 0"
+                    class="absolute -top-10 -right-10 w-40 h-40 bg-blue-500 rounded-full mix-blend-screen filter blur-[80px] opacity-30 animate-pulse">
+                </div>
+
+                <div class="flex justify-between items-start mb-6 z-10 relative">
+                    <div>
+                        <h3 class="text-xl font-bold text-white truncate max-w-[200px]" :title="ch.id">{{ ch.id }}</h3>
+                        <div class="text-[11px] font-mono text-slate-400 mt-1">
+                            Total Calls: <span class="text-emerald-400 font-semibold">{{ formatNumber(ch.totalCalls) }}
+                            </span>
+                            <span class="mx-2 text-slate-700">|</span>
+                            Score: <span class="text-amber-400 font-bold text-sm">{{ ch.currentScore.toFixed(1)
+                                }}</span>
+                        </div>
+                        <div class="flex items-center space-x-2 mt-2">
+                            <span
+                                class="px-2 py-0.5 bg-slate-800 text-slate-300 rounded text-xs font-mono border border-slate-700">{{
+                                ch.type.toUpperCase() }}</span>
+                            <span class="text-[10px] text-slate-400 truncate max-w-[160px] tracking-tight"
+                                :title="ch.models">{{ ch.models }}</span>
+                        </div>
+                    </div>
+                    <!-- Toggle Switch -->
+                    <button @click="toggleChannel(ch.id)"
+                        class="relative inline-flex h-7 w-12 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none"
+                        :class="ch.enabled ? 'bg-emerald-500' : 'bg-slate-600'">
+                        <span
+                            class="pointer-events-none inline-block h-6 w-6 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"
+                            :class="ch.enabled ? 'translate-x-5' : 'translate-x-0'"></span>
+                    </button>
+                </div>
+
+                <div class="grid grid-cols-2 gap-3 mb-6 z-10 relative">
+                    <div class="bg-slate-900/60 rounded-xl p-4 border border-slate-700/50">
+                        <div class="text-xs text-slate-500 uppercase font-semibold mb-1">Latency</div>
+                        <div class="text-xl font-mono"
+                            :class="ch.avgLatencyMs > 2000 ? 'text-red-400' : (ch.avgLatencyMs > 800 ? 'text-amber-400' : 'text-emerald-400')">
+                            {{ ch.avgLatencyMs }}<span class="text-xs ml-1 text-slate-600">ms</span></div>
+                    </div>
+                    <div class="bg-slate-900/60 rounded-xl p-4 border border-slate-700/50">
+                        <div class="text-xs text-slate-500 uppercase font-semibold mb-1">Errors</div>
+                        <div class="text-xl font-mono"
+                            :class="ch.errorCount > 0 ? 'text-red-400 font-bold' : 'text-slate-300'">{{ ch.errorCount }}
+                        </div>
+                    </div>
+                    <div class="bg-slate-900/60 rounded-xl p-4 border border-slate-700/50 relative">
+                        <div v-if="ch.currentConcurrentCalls > 0"
+                            class="absolute top-2 right-2 w-2 h-2 rounded-full bg-blue-400 animate-ping"></div>
+                        <div class="text-xs text-slate-500 uppercase font-semibold mb-1">Streams</div>
+                        <div class="text-xl font-mono text-cyan-300">{{ ch.currentConcurrentCalls }}</div>
+                    </div>
+                    <div class="bg-slate-900/60 rounded-xl p-4 border border-slate-700/50">
+                        <div class="text-xs text-slate-500 uppercase font-semibold mb-1 text-purple-400">Tokens Split
+                        </div>
+                        <div class="text-[13px] font-mono leading-tight">
+                            <div class="text-blue-400">P: {{ formatNumber(ch.promptTokensUsed) }}</div>
+                            <div class="text-purple-400">C: {{ formatNumber(ch.completionTokensUsed) }}</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="mt-auto z-10 relative bg-slate-800/40 -mx-6 -mb-6 border-t border-slate-700/50">
+                    <!-- 模型 Token 分账展示 -->
+                    <div v-if="ch.tokensByModel && Object.keys(ch.tokensByModel).length > 0" class="px-6 pt-4 pb-2">
+                        <div class="text-[10px] text-slate-500 uppercase font-semibold tracking-wider mb-2">Usage by
+                            Model (P / C)</div>
+                        <div v-for="(pair, modelName) in ch.tokensByModel" :key="modelName"
+                            class="flex justify-between items-center mb-1.5 last:mb-0">
+                            <span class="text-[11px] text-slate-400 font-mono truncate max-w-[120px]"
+                                :title="modelName">{{ modelName }}</span>
+                            <div class="text-right">
+                                <div class="text-[11px] font-mono font-bold text-slate-200">Σ {{ formatNumber(pair.t) }}</div>
+                                <div class="text-[9px] font-mono text-slate-500">P: {{ formatNumber(pair.p) }} / C: {{ formatNumber(pair.c) }}</div>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- Base Weight Slider -->
+                    <div class="p-6 pt-3">
+                        <div class="flex justify-between items-center mb-3">
+                            <label
+                                class="text-xs text-slate-400 font-semibold uppercase tracking-wider flex items-center">
+                                Base Weight <span
+                                    class="bg-slate-700 px-2 py-0.5 rounded text-white ml-2 text-[10px]">{{
+                                    ch.baseWeight }}</span>
+                            </label>
+                        </div>
+                        <input type="range" min="0" max="500" step="5" :value="ch.baseWeight"
+                            @change="updateWeight(ch.id, $event.target.value)"
+                            class="w-full h-1 bg-slate-700 rounded-lg appearance-none cursor-pointer outline-none text-emerald-500">
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const { createApp, ref, onMounted } = Vue
+
+        createApp({
+            setup() {
+                const stats = ref({
+                    totalChannels: 0, activeChannels: 0,
+                    globalTotalTokens: 0, globalPromptTokens: 0, globalCompletionTokens: 0,
+                    globalTotalCalls: 0, globalErrors: 0, avgGlobalLatency: 0
+                })
+                const channels = ref([])
+
+                const fetchData = async () => {
+                    try {
+                        const res = await axios.get('/api/admin/dashboard')
+                        stats.value = res.data.globalStats
+
+                        if (channels.value.length === 0) {
+                            channels.value = res.data.channels;
+                        } else {
+                            res.data.channels.forEach(newCh => {
+                                const oldCh = channels.value.find(c => c.id === newCh.id);
+                                if (oldCh) {
+                                    oldCh.enabled = newCh.enabled;
+                                    oldCh.avgLatencyMs = newCh.avgLatencyMs;
+                                    oldCh.errorCount = newCh.errorCount;
+                                    oldCh.currentConcurrentCalls = newCh.currentConcurrentCalls;
+                                    oldCh.totalTokensUsed = newCh.totalTokensUsed;
+                                    oldCh.promptTokensUsed = newCh.promptTokensUsed;
+                                    oldCh.completionTokensUsed = newCh.completionTokensUsed;
+                                    oldCh.totalCalls = newCh.totalCalls;
+                                    oldCh.currentScore = newCh.currentScore;
+                                    oldCh.tokensByModel = newCh.tokensByModel;
+                                } else {
+                                    channels.value.push(newCh);
+                                }
+                            });
+                        }
+                    } catch (e) {
+                        console.error('Failed fetching gateway metrics', e)
+                    }
+                }
+
+                const toggleChannel = async (id) => {
+                    await axios.post(`/api/admin/channels/${id}/toggle`)
+                    fetchData();
+                }
+
+                const updateWeight = async (id, val) => {
+                    const oldCh = channels.value.find(c => c.id === id);
+                    if (oldCh) oldCh.baseWeight = val;
+                    await axios.put(`/api/admin/channels/${id}/weight/${val}`)
+                }
+
+                const formatNumber = (num) => {
+                    if (num >= 1000000) return (num / 1000000).toFixed(2) + 'M'
+                    if (num >= 1000) return (num / 1000).toFixed(1) + 'K'
+                    return new Intl.NumberFormat('zh-CN').format(num)
+                }
+
+                const getRatio = (val, total) => {
+                    if (!total || total === 0) return 0;
+                    return (val / total * 100).toFixed(1);
+                }
+
+                onMounted(() => {
+                    fetchData()
+                    setInterval(fetchData, 2000)
+                })
+
+                return {
+                    stats, channels, toggleChannel, updateWeight, formatNumber, getRatio
+                }
+            }
+        }).mount('#app')
+    </script>
+</body>
+
+</html>

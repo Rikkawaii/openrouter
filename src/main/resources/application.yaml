@@ -1,0 +1,64 @@
+server:
+  port: 8080
+
+openrouter:
+  # ======== 真正基于多细粒度渠道/节点的千军万马 ========
+  channels:
+    - id: "deepseek-api"
+      type: "openai"          # DeepSeek 也使用 OpenAI 格式协议翻译
+      base-url: "https://api.deepseek.com"
+      api-key: "your_key"
+      models: 
+        - "deepseek-chat"
+        - "deepseek-reasoner"
+      base-weight: 120
+      enabled: true           # 留给第三步控制台的热插拔开关
+
+    # - id: "openai-gpt4"
+    #   type: "openai"
+    #   base-url: "https://api.openai.com"
+    #   api-key: "sk-your-openai-api-key-here"
+    #   models:
+    #     - "gpt-4-turbo"
+    #     - "gpt-3.5-turbo"
+    #   base-weight: 90
+    #   enabled: true
+
+#    - id: "packy-api"
+#      type: "openai"
+#      base-url: "https://www.packyapi.com"
+#      api-key: "your_key"
+#      models:
+#        - "gemini-3-flash-preview"
+#      base-weight: 200
+#      enabled: true
+
+    - id: "google-gemini"
+      type: "gemini"          # 采用 Gemini 官方原生的 HTTP SSE 协议翻译
+      base-url: "https://www.packyapi.com"
+      api-key: "your_key"
+      models:
+        - "gemini-3-flash-preview"
+      base-weight: 80
+      enabled: true
+
+# ======== 模型能力边界声明注册表 ========
+# 路由策略在收到请求后，会探测请求所需能力（如 vision），
+# 然后在打分前过滤掉不具备该能力的 channel，确保请求不会被转发给"能力不足"的模型。
+# 未声明的模型将继承 defaults 的能力（默认全为 false）。
+model-capabilities:
+  defaults:
+    vision: false
+    function-calling: false
+    long-context: false
+  models:
+    deepseek-chat:
+      vision: false
+      function-calling: true
+    deepseek-reasoner:
+      vision: false
+      function-calling: false
+    gemini-3-flash-preview:
+      vision: true
+      function-calling: true
+      long-context: true
