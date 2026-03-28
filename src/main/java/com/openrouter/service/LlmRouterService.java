@@ -110,7 +110,8 @@ public class LlmRouterService {
 
         return adapter.streamChat(request, channel)
                 .onErrorResume(e -> {
-                    log.warn("⚠️ 流式渠道 {} 调用失败 ({})，自动故障转移...", channelId, e.getMessage());
+                    log.warn("⚠️ 流式渠道 {} 调用失败 ({})，自动故障转移...", channelId, e.toString());
+                    e.printStackTrace();
                     request.setModel(originalModel);
                     Set<String> newExcluded = new HashSet<>(excludedIds);
                     newExcluded.add(channelId);

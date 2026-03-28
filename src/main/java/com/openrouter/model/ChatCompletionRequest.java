@@ -21,8 +21,24 @@ public class ChatCompletionRequest {
     @JsonProperty("max_tokens")
     private Integer maxTokens;
 
+    @JsonProperty("top_p")
+    private Double topP;
+
+    @JsonProperty("top_k")
+    private Integer topK;
+
+    private Integer n;
+
+    @JsonProperty("reasoning_effort")
+    private String reasoningEffort;
+
     @JsonProperty("stream_options")
     private StreamOptions streamOptions;
+
+    private List<Tool> tools;
+
+    @JsonProperty("tool_choice")
+    private Object toolChoice;
 
     @Data
     @Builder
@@ -31,5 +47,25 @@ public class ChatCompletionRequest {
     public static class StreamOptions {
         @JsonProperty("include_usage")
         private Boolean includeUsage;
+    }
+
+    @Data
+    @Builder
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class Tool {
+        private String type;
+        private FunctionDefinition function;
+    }
+
+    @Data
+    @Builder
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class FunctionDefinition {
+        private String name;
+        private String description;
+        private Object parameters;
+        private Boolean strict;
     }
 }

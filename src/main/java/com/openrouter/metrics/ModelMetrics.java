@@ -14,15 +14,15 @@ import java.util.concurrent.atomic.LongAdder;
 public class ModelMetrics {
 
     private final String channelId;
-    
+
     private volatile int baseWeight = 100;
-    
+
     private final AtomicLong averageLatencyMs = new AtomicLong(0);
     private final AtomicLong latencySampleCount = new AtomicLong(0);
-    
+
     private final AtomicLong errorCount = new AtomicLong(0);
     private final AtomicLong recentErrorScore = new AtomicLong(0);
-    
+
     private final LongAdder currentConcurrentCalls = new LongAdder();
 
     // =============== 账本统计指标 (全量) ===============
@@ -44,12 +44,12 @@ public class ModelMetrics {
      */
     public void addTokens(String model, long prompt, long completion) {
         long total = prompt + completion;
-        
+
         // 更新总体指标
         promptTokensUsed.addAndGet(prompt);
         completionTokensUsed.addAndGet(completion);
         totalTokensUsed.addAndGet(total);
-        
+
         // 更新分模型分账
         if (model != null && !model.isBlank()) {
             TokenPair pair = tokensByModel.computeIfAbsent(model, k -> new TokenPair());
@@ -64,25 +64,33 @@ public class ModelMetrics {
     public void addTokens(String model, long tokens) {
         totalTokensUsed.addAndGet(tokens);
         if (model != null && !model.isBlank()) {
-             TokenPair pair = tokensByModel.computeIfAbsent(model, k -> new TokenPair());
-             // 默认全记入 prompt 保证总量对齐
-             pair.prompt.addAndGet(tokens);
+            TokenPair pair = tokensByModel.computeIfAbsent(model, k -> new TokenPair());
+            // 默认全记入 prompt 保证总量对齐
+            pair.prompt.addAndGet(tokens);
         }
     }
 
     public void addTokens(long tokens) {
         totalTokensUsed.addAndGet(tokens);
     }
-    
+
     public void addTokens(long prompt, long completion) {
         promptTokensUsed.addAndGet(prompt);
         completionTokensUsed.addAndGet(completion);
         totalTokensUsed.addAndGet(prompt + completion);
     }
 
-    public long getTotalTokensUsed() { return totalTokensUsed.get(); }
-    public long getPromptTokensUsed() { return promptTokensUsed.get(); }
-    public long getCompletionTokensUsed() { return completionTokensUsed.get(); }
+    public long getTotalTokensUsed() {
+        return totalTokensUsed.get();
+    }
+
+    public long getPromptTokensUsed() {
+        return promptTokensUsed.get();
+    }
+
+    public long getCompletionTokensUsed() {
+        return completionTokensUsed.get();
+    }
 
     /** 返回按模型分桶的输入输出指标详情 */
     public Map<String, TokenPairView> getTokensByModel() {
@@ -93,12 +101,29 @@ public class ModelMetrics {
         return result;
     }
 
-    public void recordCall() { totalCalls.incrementAndGet(); }
-    public long getTotalCalls() { return totalCalls.get(); }
-    public String getChannelId() { return channelId; }
-    public int getBaseWeight() { return baseWeight; }
-    public void setBaseWeight(int baseWeight) { this.baseWeight = baseWeight; }
-    public long getAverageLatencyMs() { return averageLatencyMs.get(); }
+    public void recordCall() {
+        totalCalls.incrementAndGet();
+    }
+
+    public long getTotalCalls() {
+        return totalCalls.get();
+    }
+
+    public String getChannelId() {
+        return channelId;
+    }
+
+    public int getBaseWeight() {
+        return baseWeight;
+    }
+
+    public void setBaseWeight(int baseWeight) {
+        this.baseWeight = baseWeight;
+    }
+
+    public long getAverageLatencyMs() {
+        return averageLatencyMs.get();
+    }
 
     public void recordLatency(long latencyMs) {
         long currentAvg = averageLatencyMs.get();
@@ -111,8 +136,13 @@ public class ModelMetrics {
         }
     }
 
-    public long getErrorCount() { return errorCount.get(); }
-    public double getRecentErrorScore() { return recentErrorScore.get(); }
+    public long getErrorCount() {
+        return errorCount.get();
+    }
+
+    public double getRecentErrorScore() {
+        return recentErrorScore.get();
+    }
 
     public void recordError() {
         errorCount.incrementAndGet();
@@ -126,9 +156,17 @@ public class ModelMetrics {
         }
     }
 
-    public long getCurrentConcurrentCalls() { return currentConcurrentCalls.sum(); }
-    public void incrementConcurrent() { currentConcurrentCalls.increment(); }
-    public void decrementConcurrent() { currentConcurrentCalls.decrement(); }
+    public long getCurrentConcurrentCalls() {
+        return currentConcurrentCalls.sum();
+    }
+
+    public void incrementConcurrent() {
+        currentConcurrentCalls.increment();
+    }
+
+    public void decrementConcurrent() {
+        currentConcurrentCalls.decrement();
+    }
 
     /** 内部使用的可变计数对 */
     private static class TokenPair {
