@@ -28,18 +28,19 @@ public class DynamicModelRoutingStrategy implements ModelRoutingStrategy {
     private final ModelCapabilitiesProperties capabilitiesProperties;
 
     // ===== 动态分平衡系数 ======
-    private static final double HEALTH_PENALTY_WEIGHT = 10.0;
+    private static final double HEALTH_PENALTY_WEIGHT = 50.0;
     private static final double LATENCY_WEIGHT = 0.05;
     private static final double CONSECUTIVE_CALL_PENALTY = 5.0;
 
     public DynamicModelRoutingStrategy(MetricsRegistry metricsRegistry,
-                                       ModelCapabilitiesProperties capabilitiesProperties) {
+            ModelCapabilitiesProperties capabilitiesProperties) {
         this.metricsRegistry = metricsRegistry;
         this.capabilitiesProperties = capabilitiesProperties;
     }
 
     @Override
-    public RouterProperties.Channel selectChannel(ChatCompletionRequest request, List<RouterProperties.Channel> availableChannels) {
+    public RouterProperties.Channel selectChannel(ChatCompletionRequest request,
+            List<RouterProperties.Channel> availableChannels) {
         String targetModel = request.getModel();
         if (!StringUtils.hasText(targetModel)) {
             throw new IllegalArgumentException("Model name is required for routing.");
@@ -83,11 +84,11 @@ public class DynamicModelRoutingStrategy implements ModelRoutingStrategy {
         RouterProperties.Channel bestChannel = activeChannels.stream()
                 .max(Comparator.comparingDouble(this::calculateScore))
                 .orElse(null);
-                
+
         if (bestChannel != null) {
             log.info("🎯 [Auto Routing] 最终选中了得分最高的服务渠道节点: {}", bestChannel.getId());
         }
-        
+
         return bestChannel;
     }
 
@@ -96,21 +97,21 @@ public class DynamicModelRoutingStrategy implements ModelRoutingStrategy {
 
         // 始终读取 yaml 配置当前的固定分（如果做成控制台热更，能立马拿得到最新配置）
         int baseWeight = channel.getBaseWeight();
-        
+
         // 【路由惩罚】使用近期错误惩罚值（随时间衰减, 不影响历史账本）
-        double recentErrorPenalty = metrics.getRecentErrorScore();
+        double recentErrorCount = metrics.getRecentErrorCount();
         long avgLatency = metrics.getAverageLatencyMs();
         long concurrentCalls = metrics.getCurrentConcurrentCalls();
 
         // 黄金打分公式
-        double finalScore = baseWeight 
-                - (recentErrorPenalty * HEALTH_PENALTY_WEIGHT) 
-                - (avgLatency * LATENCY_WEIGHT) 
+        double finalScore = baseWeight
+                - (recentErrorCount * HEALTH_PENALTY_WEIGHT)
+                - (avgLatency * LATENCY_WEIGHT)
                 - (concurrentCalls * CONSECUTIVE_CALL_PENALTY);
 
-        log.debug("📊 打分详情 - 渠道: {}, 基础分: {}, 近期错误惩罚: {}, TTFT扣减: {}ms, 高流阻力: {}, -> 综合总得分为: {}", 
-                channel.getId(), baseWeight, recentErrorPenalty, avgLatency, concurrentCalls, finalScore);
-        
+        log.debug("📊 打分详情 - 渠道: {}, 基础分: {}, 近期错误惩罚: {}, TTFT扣减: {}ms, 高流阻力: {}, -> 综合总得分为: {}",
+                channel.getId(), baseWeight, recentErrorCount, avgLatency, concurrentCalls, finalScore);
+
         return finalScore;
     }
 
@@ -120,7 +121,8 @@ public class DynamicModelRoutingStrategy implements ModelRoutingStrategy {
      * - 如果是 auto 模式，检查该 Channel 的 models 列表中是否有至少一个 vision 模型。
      */
     private boolean channelSupportsVision(RouterProperties.Channel channel, String targetModel) {
-        if (channel.getModels() == null || channel.getModels().isEmpty()) return false;
+        if (channel.getModels() == null || channel.getModels().isEmpty())
+            return false;
 
         if ("auto".equalsIgnoreCase(targetModel)) {
             // auto 模式：channel 内任意一个模型具备 vision 即可通过
@@ -132,4 +134,3 @@ public class DynamicModelRoutingStrategy implements ModelRoutingStrategy {
         }
     }
 }
-

@@ -18,10 +18,12 @@ public class ModelMetrics {
     private volatile int baseWeight = 100;
 
     private final AtomicLong averageLatencyMs = new AtomicLong(0);
+    private final AtomicLong averageTotalDurationMs = new AtomicLong(0);
     private final AtomicLong latencySampleCount = new AtomicLong(0);
+    private final AtomicLong totalDurationSampleCount = new AtomicLong(0);
 
     private final AtomicLong errorCount = new AtomicLong(0);
-    private final AtomicLong recentErrorScore = new AtomicLong(0);
+    private final AtomicLong recentErrorCount = new AtomicLong(0);
 
     private final LongAdder currentConcurrentCalls = new LongAdder();
 
@@ -125,7 +127,12 @@ public class ModelMetrics {
         return averageLatencyMs.get();
     }
 
+    public long getAverageTotalDurationMs() {
+        return averageTotalDurationMs.get();
+    }
+
     public void recordLatency(long latencyMs) {
+        if (latencyMs <= 0) return; // ignore 0 for non-streaming requests
         long currentAvg = averageLatencyMs.get();
         latencySampleCount.incrementAndGet();
         if (currentAvg == 0) {
@@ -136,23 +143,35 @@ public class ModelMetrics {
         }
     }
 
+    public void recordTotalDuration(long durationMs) {
+        if (durationMs <= 0) return;
+        long currentAvg = averageTotalDurationMs.get();
+        totalDurationSampleCount.incrementAndGet();
+        if (currentAvg == 0) {
+            averageTotalDurationMs.set(durationMs);
+        } else {
+            long newAvg = (long) (currentAvg * 0.7 + durationMs * 0.3);
+            averageTotalDurationMs.set(newAvg);
+        }
+    }
+
     public long getErrorCount() {
         return errorCount.get();
     }
 
-    public double getRecentErrorScore() {
-        return recentErrorScore.get();
+    public double getRecentErrorCount() {
+        return recentErrorCount.get();
     }
 
     public void recordError() {
         errorCount.incrementAndGet();
-        recentErrorScore.incrementAndGet();
+        recentErrorCount.incrementAndGet();
     }
 
     public void decayErrors() {
-        long current = recentErrorScore.get();
+        long current = recentErrorCount.get();
         if (current > 0) {
-            recentErrorScore.compareAndSet(current, current / 2);
+            recentErrorCount.compareAndSet(current, current / 2);
         }
     }
 

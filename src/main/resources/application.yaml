@@ -1,18 +1,40 @@
 server:
-  port: 8080
+  port: 10086
+
+spring:
+  codec:
+    max-in-memory-size: 50MB
+  datasource:
+    url: jdbc:sqlite:openrouter.db
+    driver-class-name: org.sqlite.JDBC
 
 openrouter:
+  # 可选：路由系统对外的鉴权密钥，防止别人恶意调用你的网关 (留空或去掉即为公开访问)
+  api-key: "sk-openrouter-admin-key"
+  
+  # 导师规则：当没有任何上下文（只有全新一句话）时，总是强制优先指派给该导师模型
+  mentor-model: "gemini-3-flash-preview"
+  
   # ======== 真正基于多细粒度渠道/节点的千军万马 ========
   channels:
-    - id: "deepseek-api"
+    - id: "deepseek"
       type: "openai"          # DeepSeek 也使用 OpenAI 格式协议翻译
       base-url: "https://api.deepseek.com"
-      api-key: "your_key"
-      models: 
+      api-key: "key"
+      models:
         - "deepseek-chat"
         - "deepseek-reasoner"
       base-weight: 120
       enabled: true           # 留给第三步控制台的热插拔开关
+
+    - id: "packy"
+      type: "openai"
+      base-url: "https://www.packyapi.com"
+      api-key: "key"
+      models:
+        - "gemini-3-flash-preview"
+      base-weight: 200
+      enabled: true
 
     # - id: "openai-gpt4"
     #   type: "openai"
@@ -24,23 +46,15 @@ openrouter:
     #   base-weight: 90
     #   enabled: true
 
-#    - id: "packy-api"
-#      type: "openai"
+
+#    - id: "google-gemini"
+#      type: "gemini"          # 采用 Gemini 官方原生的 HTTP SSE 协议翻译
 #      base-url: "https://www.packyapi.com"
-#      api-key: "your_key"
+#      api-key: "key"
 #      models:
 #        - "gemini-3-flash-preview"
-#      base-weight: 200
+#      base-weight: 80
 #      enabled: true
-
-    - id: "google-gemini"
-      type: "gemini"          # 采用 Gemini 官方原生的 HTTP SSE 协议翻译
-      base-url: "https://www.packyapi.com"
-      api-key: "your_key"
-      models:
-        - "gemini-3-flash-preview"
-      base-weight: 80
-      enabled: true
 
 # ======== 模型能力边界声明注册表 ========
 # 路由策略在收到请求后，会探测请求所需能力（如 vision），

@@ -45,12 +45,19 @@
                     LLM Gateway</p>
             </div>
             <div class="flex items-center space-x-3 bg-slate-800/50 px-4 py-2 rounded-full border border-slate-700">
-                <span class="relative flex h-3 w-3">
-                    <span
-                        class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                <span v-if="timeRange === 'realtime'" class="relative flex h-3 w-3">
+                    <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
                     <span class="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
                 </span>
-                <span class="text-emerald-400 font-mono text-xs tracking-wider">LIVE SYNC : 2000MS</span>
+                <span v-else class="relative flex h-3 w-3">
+                    <span class="relative inline-flex rounded-full h-3 w-3 bg-slate-500"></span>
+                </span>
+                <select v-model="timeRange" @change="handleTimeRangeChange" class="bg-transparent text-emerald-400 font-mono text-xs tracking-wider outline-none cursor-pointer appearance-none">
+                    <option value="realtime" class="bg-slate-800">LIVE SYNC : 2000MS</option>
+                    <option value="1h" class="bg-slate-800">HISTORY : LAST 1 HOUR</option>
+                    <option value="24h" class="bg-slate-800">HISTORY : LAST 24 HOURS</option>
+                    <option value="7d" class="bg-slate-800">HISTORY : LAST 7 DAYS</option>
+                </select>
             </div>
         </header>
 
@@ -110,7 +117,7 @@
             <div>
                 <h2 class="text-2xl font-bold text-slate-200">Channel Matrix</h2>
                 <div class="text-sm text-amber-500/80 font-mono mt-1 font-semibold tracking-wide">
-                    Live Score = BaseWeight - (Errors × 10) - (TTFT × 0.05) - (Streams × 5)
+                    Live Score = BaseWeight - (RecentErrors × 10) - (TTFT × 0.05) - (Streams × 5)
                 </div>
             </div>
         </div>
@@ -154,10 +161,18 @@
 
                 <div class="grid grid-cols-2 gap-3 mb-6 z-10 relative">
                     <div class="bg-slate-900/60 rounded-xl p-4 border border-slate-700/50">
-                        <div class="text-xs text-slate-500 uppercase font-semibold mb-1">Latency</div>
-                        <div class="text-xl font-mono"
-                            :class="ch.avgLatencyMs > 2000 ? 'text-red-400' : (ch.avgLatencyMs > 800 ? 'text-amber-400' : 'text-emerald-400')">
-                            {{ ch.avgLatencyMs }}<span class="text-xs ml-1 text-slate-600">ms</span></div>
+                        <div class="flex justify-between items-center mb-1">
+                            <span class="text-xs text-slate-500 uppercase font-semibold">TTFT</span>
+                            <span class="text-[9px] text-slate-600 uppercase">Total</span>
+                        </div>
+                        <div class="flex justify-between items-baseline">
+                            <div class="text-xl font-mono" :class="ch.avgLatencyMs > 2000 ? 'text-red-400' : (ch.avgLatencyMs > 800 ? 'text-amber-400' : 'text-emerald-400')">
+                                {{ ch.avgLatencyMs }}<span class="text-[10px] ml-0.5 text-slate-600">ms</span>
+                            </div>
+                            <div class="text-xs font-mono text-slate-400">
+                                {{ ch.avgTotalDurationMs }}ms
+                            </div>
+                        </div>
                     </div>
                     <div class="bg-slate-900/60 rounded-xl p-4 border border-slate-700/50">
                         <div class="text-xs text-slate-500 uppercase font-semibold mb-1">Errors</div>
@@ -226,6 +241,8 @@
                     globalTotalCalls: 0, globalErrors: 0, avgGlobalLatency: 0
                 })
                 const channels = ref([])
+                const timeRange = ref('realtime')
+                let liveInterval = null;
 
                 const fetchData = async () => {
                     try {
@@ -240,6 +257,7 @@
                                 if (oldCh) {
                                     oldCh.enabled = newCh.enabled;
                                     oldCh.avgLatencyMs = newCh.avgLatencyMs;
+                                    oldCh.avgTotalDurationMs = newCh.avgTotalDurationMs;
                                     oldCh.errorCount = newCh.errorCount;
                                     oldCh.currentConcurrentCalls = newCh.currentConcurrentCalls;
                                     oldCh.totalTokensUsed = newCh.totalTokensUsed;
@@ -255,6 +273,92 @@
                         }
                     } catch (e) {
                         console.error('Failed fetching gateway metrics', e)
+                    }
+                }
+
+                const fetchRangeData = async () => {
+                    const end = new Date()
+                    const start = new Date()
+                    if (timeRange.value === '1h') start.setHours(start.getHours() - 1)
+                    if (timeRange.value === '24h') start.setHours(start.getHours() - 24)
+                    if (timeRange.value === '7d') start.setDate(start.getDate() - 7)
+
+                    const formatISO = (date) => {
+                        const tzOffset = date.getTimezoneOffset() * 60000
+                        return new Date(date - tzOffset).toISOString().slice(0, -1)
+                    }
+
+                    try {
+                        const res = await axios.get(`/api/admin/stats/range?start=${formatISO(start)}&end=${formatISO(end)}`)
+                        const rangeData = res.data
+                        
+                        let gTokens = 0, gPrompt = 0, gComp = 0, gCalls = 0, gErrors = 0, sumLat = 0, activeCount = 0;
+                        
+                        channels.value.forEach(ch => {
+                            const modelStats = rangeData.filter(r => r.channelId === ch.id)
+                            if (modelStats.length > 0) {
+                                ch.totalTokensUsed = modelStats.reduce((sum, r) => sum + (r.total || 0), 0)
+                                ch.promptTokensUsed = modelStats.reduce((sum, r) => sum + (r.p || 0), 0)
+                                ch.completionTokensUsed = modelStats.reduce((sum, r) => sum + (r.c || 0), 0)
+                                ch.totalCalls = modelStats.reduce((sum, r) => sum + (r.totalCalls || 0), 0)
+                                ch.errorCount = modelStats.reduce((sum, r) => sum + (r.errorCount || 0), 0)
+                                
+                                const latSum = modelStats.reduce((sum, r) => sum + ((r.avgLat || 0) * (r.totalCalls || 0)), 0)
+                                ch.avgLatencyMs = ch.totalCalls > 0 ? Math.round(latSum / ch.totalCalls) : 0
+                                
+                                const durSum = modelStats.reduce((sum, r) => sum + ((r.avgDur || 0) * (r.totalCalls || 0)), 0)
+                                ch.avgTotalDurationMs = ch.totalCalls > 0 ? Math.round(durSum / ch.totalCalls) : 0
+                                
+                                ch.currentConcurrentCalls = 0
+                                ch.tokensByModel = {}
+                                modelStats.forEach(r => {
+                                    if (r.model) {
+                                        ch.tokensByModel[r.model] = {
+                                            t: r.total || 0,
+                                            p: r.p || 0,
+                                            c: r.c || 0
+                                        }
+                                    }
+                                })
+                                
+                                gTokens += ch.totalTokensUsed
+                                gPrompt += ch.promptTokensUsed
+                                gComp += ch.completionTokensUsed
+                                gCalls += ch.totalCalls
+                                gErrors += ch.errorCount
+                                if (ch.avgLatencyMs > 0) {
+                                    sumLat += ch.avgLatencyMs
+                                    activeCount++
+                                }
+                            } else {
+                                ch.totalTokensUsed = 0; ch.promptTokensUsed = 0; ch.completionTokensUsed = 0;
+                                ch.totalCalls = 0; ch.errorCount = 0; ch.avgLatencyMs = 0; ch.avgTotalDurationMs = 0;
+                                ch.currentConcurrentCalls = 0; ch.tokensByModel = {};
+                            }
+                        })
+                        
+                        stats.value = {
+                            totalChannels: channels.value.length,
+                            activeChannels: channels.value.filter(c => c.enabled).length,
+                            globalTotalTokens: gTokens,
+                            globalPromptTokens: gPrompt,
+                            globalCompletionTokens: gComp,
+                            globalTotalCalls: gCalls,
+                            globalErrors: gErrors,
+                            avgGlobalLatency: activeCount > 0 ? Math.round(sumLat / activeCount) : 0
+                        }
+                    } catch (e) {
+                        console.error('Failed fetching range data', e)
+                    }
+                }
+
+                const handleTimeRangeChange = () => {
+                    if (timeRange.value === 'realtime') {
+                        fetchData()
+                        liveInterval = setInterval(fetchData, 2000)
+                    } else {
+                        clearInterval(liveInterval)
+                        fetchRangeData()
                     }
                 }
 
@@ -282,11 +386,11 @@
 
                 onMounted(() => {
                     fetchData()
-                    setInterval(fetchData, 2000)
+                    liveInterval = setInterval(fetchData, 2000)
                 })
 
                 return {
-                    stats, channels, toggleChannel, updateWeight, formatNumber, getRatio
+                    stats, channels, timeRange, toggleChannel, updateWeight, formatNumber, getRatio, handleTimeRangeChange
                 }
             }
         }).mount('#app')

@@ -6,14 +6,18 @@ import com.openrouter.metrics.MetricsRegistry;
 import com.openrouter.metrics.ModelMetrics;
 import com.openrouter.model.ChatCompletionRequest;
 import com.openrouter.model.ChatCompletionResponse;
+import com.openrouter.service.UsageLogger;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.core.publisher.SignalType;
 
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -23,13 +27,15 @@ public class OpenAiLlmAdapter implements LlmClientAdapter {
 
     private final WebClient webClient;
     private final MetricsRegistry metricsRegistry;
+    private final UsageLogger usageLogger;
+    
     private static final Pattern PROMPT_PATTERN = Pattern.compile("\"prompt_tokens\"\\s*:\\s*(\\d+)");
-
     private static final Pattern COMPLETION_PATTERN = Pattern.compile("\"completion_tokens\"\\s*:\\s*(\\d+)");
 
-    public OpenAiLlmAdapter(WebClient routerWebClient, MetricsRegistry metricsRegistry) {
+    public OpenAiLlmAdapter(WebClient routerWebClient, MetricsRegistry metricsRegistry, UsageLogger usageLogger) {
         this.webClient = routerWebClient;
         this.metricsRegistry = metricsRegistry;
+        this.usageLogger = usageLogger;
     }
 
     @Override
@@ -57,20 +63,22 @@ public class OpenAiLlmAdapter implements LlmClientAdapter {
                     metrics.recordCall();
                 })
                 .doOnNext(res -> {
-                    metrics.recordLatency(System.currentTimeMillis() - startTime);
+                    long duration = System.currentTimeMillis() - startTime;
+                    metrics.recordTotalDuration(duration);
+                    long p = 0, c = 0;
                     if (res.getUsage() != null) {
-                        metrics.addTokens(request.getModel(),
-                                res.getUsage().getPromptTokens(),
-                                res.getUsage().getCompletionTokens());
+                        p = res.getUsage().getPromptTokens();
+                        c = res.getUsage().getCompletionTokens();
+                        metrics.addTokens(request.getModel(), p, c);
                     }
+                    usageLogger.recordLogAsync(channel.getId(), request.getModel(), p, c, 0, duration, true, null);
                 })
                 .doOnError(e -> {
-                    System.out.print("出现错误");
                     metrics.recordError();
+                    long duration = System.currentTimeMillis() - startTime;
+                    usageLogger.recordLogAsync(channel.getId(), request.getModel(), 0, 0, duration, duration, false, e.getMessage());
                 })
                 .doFinally(sig -> metrics.decrementConcurrent());
-        // data:{"id":"e880091b-3932-4567-83ad-bd88d17d2d25","object":"chat.completion.chunk","created":1774629629,"model":"deepseek-reasoner","system_fingerprint":"fp_eaab8d114b_prod0820_fp8_kvcache_new_kvcache","choices":[{"index":0,"delta":{"content":"","reasoning_content":null},"logprobs":null,"finish_reason":"stop"}],"usage":{"prompt_tokens":8,"completion_tokens":463,"total_tokens":471,"prompt_tokens_details":{"cached_tokens":0},"completion_tokens_details":{"reasoning_tokens":100},"prompt_cache_hit_tokens":0,"prompt_cache_miss_tokens":8}}
-
     }
 
     @Override
@@ -100,25 +108,39 @@ public class OpenAiLlmAdapter implements LlmClientAdapter {
                 .transform(flux -> {
                     long startTime = System.currentTimeMillis();
                     AtomicBoolean first = new AtomicBoolean(true);
+                    AtomicLong ttft = new AtomicLong(0);
+                    AtomicLong lastP = new AtomicLong(0);
+                    AtomicLong lastC = new AtomicLong(0);
+                    AtomicReference<String> errorMsg = new AtomicReference<>(null);
+
                     return flux.doOnNext(item -> {
                         if (first.compareAndSet(true, false)) {
-                            metrics.recordLatency(System.currentTimeMillis() - startTime);
+                            long firstLat = System.currentTimeMillis() - startTime;
+                            ttft.set(firstLat);
+                            metrics.recordLatency(firstLat);
                         }
-                        log.info(item);
                         if (item.contains("\"usage\":{")) {
                             try {
-                                // 提取 prompt_tokens
                                 Matcher m1 = PROMPT_PATTERN.matcher(item);
-                                // 提取 completion_tokens
                                 Matcher m2 = COMPLETION_PATTERN.matcher(item);
                                 if (m1.find() && m2.find()) {
-                                    metrics.addTokens(request.getModel(),
-                                            Long.parseLong(m1.group(1)),
-                                            Long.parseLong(m2.group(1)));
+                                    long p = Long.parseLong(m1.group(1));
+                                    long c = Long.parseLong(m2.group(1));
+                                    metrics.addTokens(request.getModel(), p, c);
+                                    lastP.set(p);
+                                    lastC.set(c);
                                 }
                             } catch (Exception ignored) {
                             }
                         }
+                    })
+                    .doOnError(e -> errorMsg.set(e.getMessage()))
+                    .doFinally(sig -> {
+                        long totalDuration = System.currentTimeMillis() - startTime;
+                        metrics.recordTotalDuration(totalDuration);
+                        boolean success = sig != SignalType.ON_ERROR;
+                        usageLogger.recordLogAsync(channel.getId(), request.getModel(), lastP.get(), lastC.get(), 
+                                                   ttft.get(), totalDuration, success, errorMsg.get());
                     });
                 })
                 .doOnError(e -> {

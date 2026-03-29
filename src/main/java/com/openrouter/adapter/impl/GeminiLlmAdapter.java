@@ -10,16 +10,19 @@ import com.openrouter.metrics.ModelMetrics;
 import com.openrouter.model.ChatCompletionMessage;
 import com.openrouter.model.ChatCompletionRequest;
 import com.openrouter.model.ChatCompletionResponse;
+import com.openrouter.service.UsageLogger;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.core.publisher.SignalType;
 
 import java.util.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -30,16 +33,18 @@ public class GeminiLlmAdapter implements LlmClientAdapter {
     private final WebClient webClient;
     private final ObjectMapper objectMapper;
     private final MetricsRegistry metricsRegistry;
+    private final UsageLogger usageLogger;
 
     private static final String geminiFunctionThoughtSignature = "skip_thought_signature_validator";
 
     private static final Pattern PROMPT_PATTERN = Pattern.compile("\"prompt_tokens\"\\s*:\\s*(\\d+)");
     private static final Pattern COMPLETION_PATTERN = Pattern.compile("\"completion_tokens\"\\s*:\\s*(\\d+)");
 
-    public GeminiLlmAdapter(WebClient routerWebClient, ObjectMapper objectMapper, MetricsRegistry metricsRegistry) {
+    public GeminiLlmAdapter(WebClient routerWebClient, ObjectMapper objectMapper, MetricsRegistry metricsRegistry, UsageLogger usageLogger) {
         this.webClient = routerWebClient;
         this.objectMapper = objectMapper;
         this.metricsRegistry = metricsRegistry;
+        this.usageLogger = usageLogger;
     }
 
     @Override
@@ -55,13 +60,10 @@ public class GeminiLlmAdapter implements LlmClientAdapter {
 
     @Override
     public Flux<String> streamChat(ChatCompletionRequest request, RouterProperties.Channel channel) {
-        log.info("gemini stream");
-        log.info("openai request:{}", request);
         // 模型代号已经在 Service 层基于 models 列表装配完毕
         String model = request.getModel();
         String url = channel.getBaseUrl() + "/v1beta/models/" + model + ":streamGenerateContent?alt=sse";
         String geminiJsonBody = convertToGeminiRequest(request);
-        log.info("gemini request:{}", geminiJsonBody);
         ModelMetrics metrics = metricsRegistry.getMetrics(channel.getId());
 
         return webClient.post()
@@ -73,7 +75,6 @@ public class GeminiLlmAdapter implements LlmClientAdapter {
                 .retrieve()
                 .bodyToFlux(String.class)
                 .mapNotNull(data -> {
-                    log.info(data);
                     try {
                         return convertToOpenAiChunk(data, model);
                     } catch (Exception e) {
@@ -92,10 +93,14 @@ public class GeminiLlmAdapter implements LlmClientAdapter {
                     // 维护请求级别的增量水位线
                     AtomicLong lastP = new AtomicLong(0);
                     AtomicLong lastC = new AtomicLong(0);
+                    AtomicLong ttft = new AtomicLong(0);
+                    AtomicReference<String> errorMsg = new AtomicReference<>(null);
 
                     return flux.doOnNext(item -> {
                         if (first.compareAndSet(true, false)) {
-                            metrics.recordLatency(System.currentTimeMillis() - startTime);
+                            long firstLat = System.currentTimeMillis() - startTime;
+                            ttft.set(firstLat);
+                            metrics.recordLatency(firstLat);
                         }
 
                         // 只有包含 usage 的报文才触发解析
@@ -117,6 +122,14 @@ public class GeminiLlmAdapter implements LlmClientAdapter {
                             } catch (Exception ignored) {
                             }
                         }
+                    })
+                    .doOnError(e -> errorMsg.set(e.getMessage()))
+                    .doFinally(sig -> {
+                        long totalDuration = System.currentTimeMillis() - startTime;
+                        metrics.recordTotalDuration(totalDuration);
+                        boolean success = sig != SignalType.ON_ERROR;
+                        usageLogger.recordLogAsync(channel.getId(), request.getModel(), lastP.get(), lastC.get(), 
+                                                   ttft.get(), totalDuration, success, errorMsg.get());
                     });
                 })
                 .doOnError(e -> metrics.recordError())
@@ -365,11 +378,11 @@ public class GeminiLlmAdapter implements LlmClientAdapter {
                                 inlineData.put("mimeType", mimeType);
                                 inlineData.put("data", base64Data);
                                 targetParts.add(Collections.singletonMap("inlineData", inlineData));
-                                targetParts.add(Collections.singletonMap("thoughtSignature", geminiFunctionThoughtSignature));
+                                targetParts.add(
+                                        Collections.singletonMap("thoughtSignature", geminiFunctionThoughtSignature));
                             }
                         } else {
                             // Remote URL: fileData
-                            log.info("转换图片！！！");
                             Map<String, Object> fileData = new LinkedHashMap<>();
                             fileData.put("mimeType", "image/jpeg"); // Default to jpeg for remote URLs
                             fileData.put("fileUri", url);

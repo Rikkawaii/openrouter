@@ -27,11 +27,11 @@ public class MetricsRegistry {
 
     /**
      * Spring 轻松定时任务。
-     * 每 60 秒（30000 毫秒）执行一次。
+     * 每 60 秒（60000 毫秒）执行一次。
      * 强行把所有目前在暗处默默报错的模型的 errorCount 除以 2！
      * 这完全实现了“只要别一直崩溃，就随着时间让你自然翻篇重来” 的终极自适应逻辑。
      */
-    @Scheduled(fixedRate = 30000)
+    @Scheduled(fixedRate = 60000)
     public void scheduleHealthDecay() {
         for (ModelMetrics metrics : metricsMap.values()) {
             metrics.decayErrors();

@@ -14,6 +14,12 @@ import java.util.List;
 @ConfigurationProperties(prefix = "openrouter")
 public class RouterProperties {
 
+    // 路由网关对外的统一授权密钥
+    private String apiKey;
+
+    // 导师规则：无上下文时优先指派的模型
+    private String mentorModel;
+
     private List<Channel> channels;
 
     @Data
