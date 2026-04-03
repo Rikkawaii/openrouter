@@ -31,6 +31,39 @@
         [v-cloak] {
             display: none;
         }
+
+        /* 终端特有样式 */
+        .terminal-container {
+            background: #000;
+            border-top: 1px solid #333;
+            font-family: 'Fira Code', 'Menlo', 'Monaco', 'Consolas', monospace;
+            box-shadow: 0 -10px 40px rgba(0,0,0,0.5);
+        }
+        .log-line {
+            line-height: 1.4;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+        .log-time { color: #64748b; }
+        .log-info { color: #34d399; }
+        .log-warn { color: #fbbf24; }
+        .log-error { color: #f87171; }
+        .log-trace-id { color: #818cf8; opacity: 0.8; }
+        .log-stage { color: #38bdf8; font-weight: 500; }
+        
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #334155;
+            border-radius: 10px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #475569;
+        }
     </style>
 </head>
 
@@ -254,6 +287,39 @@
                 </div>
             </div>
         </div>
+
+        <!-- 🔧 实时终端 (Terminal) -->
+        <div class="fixed bottom-0 left-0 right-0 z-50 transition-all duration-300" 
+             :class="isTerminalOpen ? 'h-[350px]' : 'h-10'">
+            
+            <!-- 终端 Header -->
+            <div @click="isTerminalOpen = !isTerminalOpen" 
+                 class="h-10 bg-slate-900 border-t border-slate-700 flex items-center justify-between px-6 cursor-pointer hover:bg-slate-800 transition-colors">
+                <div class="flex items-center space-x-3">
+                    <svg class="w-4 h-4 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
+                    </svg>
+                    <span class="text-[11px] font-bold uppercase tracking-widest text-slate-300">Live Trace Terminal</span>
+                    <span class="px-2 py-0.5 bg-emerald-500/10 text-emerald-400 text-[9px] rounded-full border border-emerald-500/20">WS CONNECTED</span>
+                </div>
+                <div class="flex items-center space-x-4">
+                    <button @click.stop="clearLogs" class="text-[10px] text-slate-500 hover:text-white uppercase font-bold tracking-tighter">Clear</button>
+                    <div class="h-4 w-px bg-slate-700"></div>
+                    <svg class="w-4 h-4 text-slate-500 transition-transform duration-300" 
+                         :class="{'rotate-180': !isTerminalOpen}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+                    </svg>
+                </div>
+            </div>
+
+            <!-- 终端内容 -->
+            <div v-show="isTerminalOpen" ref="terminalBody" class="terminal-container h-[310px] overflow-y-auto p-4 text-[13px]">
+                <div v-for="(log, idx) in logs" :key="idx" class="log-line mb-1">
+                    <span v-html="formatLog(log)"></span>
+                </div>
+                <div id="terminal-bottom"></div>
+            </div>
+        </div>
     </div>
 
     <script>
@@ -268,7 +334,69 @@
                 })
                 const channels = ref([])
                 const timeRange = ref('realtime')
+                const isTerminalOpen = ref(false)
+                const logs = ref([])
+                const terminalBody = ref(null)
                 let liveInterval = null;
+                let ws = null;
+
+                const connectWs = () => {
+                    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                    const wsUrl = `${protocol}//${window.location.host}/api/admin/logs/ws`;
+                    
+                    ws = new WebSocket(wsUrl);
+                    
+                    ws.onmessage = (event) => {
+                        logs.value.push(event.data);
+                        if (logs.value.length > 2000) logs.value.shift();
+                        
+                        // 自动滚动到终端底部
+                        if (isTerminalOpen.value) {
+                            setTimeout(() => {
+                                if (terminalBody.value) {
+                                    terminalBody.value.scrollTop = terminalBody.value.scrollHeight;
+                                }
+                            }, 50);
+                        }
+                    };
+
+                    ws.onclose = () => {
+                        console.log('WS Disconnected, retrying in 5s...');
+                        setTimeout(connectWs, 5000);
+                    };
+                };
+
+                const formatLog = (text) => {
+                    if (!text) return '';
+                    
+                    // 0. 基础 HTML 转义，防止消息内容干扰（放在最前面）
+                    let html = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                    
+                    // 1. 处理时间戳 [HH:mm:ss.SSS] (由于已经转义，匹配 &lt; 和 &gt;)
+                    html = html.replace(/^\[(\d{2}:\d{2}:\d{2}\.\d{3})\]/, '<span class="log-time">[$1]</span>');
+                    
+                    // 2. 处理日志级别
+                    html = html.replace(/\[(INFO|SUCCESS)\]/g, '<span class="log-info">[$1]</span>');
+                    html = html.replace(/\[(WARN)\]/g, '<span class="log-warn">[$1]</span>');
+                    html = html.replace(/\[(ERROR)\]/g, '<span class="log-error">[$1]</span>');
+
+                    // 3. 处理阶段标记 【软件工程】
+                    html = html.replace(/【(.*?)】/g, '<span class="log-stage">【$1】</span>');
+
+                    // 4. 精确匹配末尾的 TraceID (形如 &lt;7859a0ae&gt;)
+                    // 使用更加具体的正则，避免误伤我们自己生成的 span 标签
+                    html = html.replace(/&lt;([a-f0-9]{8})&gt;$/g, '<span class="log-trace-id">&lt;$1&gt;</span>');
+                    
+                    // 5. 状态着色优化
+                    html = html.replace(/ (成功|完成)/g, ' <span class="log-info">$1</span>');
+                    html = html.replace(/ (失败|错误)/g, ' <span class="log-error">$1</span>');
+
+                    return html;
+                }
+
+                const clearLogs = () => {
+                    logs.value = [];
+                }
 
                 const fetchData = async () => {
                     try {
@@ -361,11 +489,13 @@
 
                 onMounted(() => {
                     fetchData()
+                    connectWs()
                     liveInterval = setInterval(fetchData, 2000)
                 })
 
                 return {
-                    stats, channels, timeRange, toggleChannel, updateWeight, formatNumber, getRatio, handleTimeRangeChange
+                    stats, channels, timeRange, toggleChannel, updateWeight, formatNumber, getRatio, handleTimeRangeChange,
+                    isTerminalOpen, logs, terminalBody, formatLog, clearLogs
                 }
             }
         }).mount('#app')

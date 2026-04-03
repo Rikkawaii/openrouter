@@ -23,7 +23,7 @@ public class ChatCompletionRequest {
     private RequestTraceContext traceContext;
     private Boolean stream;
     private Double temperature;
-    
+
     @JsonProperty("max_tokens")
     private Integer maxTokens;
 

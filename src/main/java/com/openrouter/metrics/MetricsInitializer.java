@@ -19,21 +19,24 @@ public class MetricsInitializer implements CommandLineRunner {
     private final MetricsRegistry metricsRegistry;
     private final RouterProperties routerProperties;
     private final DailyStatsService dailyStatsService;
+    private final com.openrouter.trace.TraceLogger traceLogger;
 
     public MetricsInitializer(JdbcTemplate jdbcTemplate, MetricsRegistry metricsRegistry,
-            RouterProperties routerProperties, DailyStatsService dailyStatsService) {
+            RouterProperties routerProperties, DailyStatsService dailyStatsService,
+            com.openrouter.trace.TraceLogger traceLogger) {
         this.jdbcTemplate = jdbcTemplate;
         this.metricsRegistry = metricsRegistry;
         this.routerProperties = routerProperties;
         this.dailyStatsService = dailyStatsService;
+        this.traceLogger = traceLogger;
     }
 
     @Override
     public void run(String... args) {
-        log.info("🚀 [1/3] 系统启动：正在从 SQLite 恢复通道动态配置...");
+        traceLogger.log("INFO", "🚀 [1/3] 系统启动：正在从 SQLite 恢复通道动态配置...");
         List<RouterProperties.Channel> channels = routerProperties.getChannels();
         if (channels == null || channels.isEmpty()) {
-            log.warn("⚠️ 未发现任何配置通道，跳过初始化。");
+            traceLogger.log("WARN", "⚠️ 未发现任何配置通道，跳过初始化。");
             return;
         }
 
@@ -56,10 +59,10 @@ public class MetricsInitializer implements CommandLineRunner {
                 }
             }
         }
-        log.info("✅ 通道开关、权重等动态配置预加载完成。");
+        traceLogger.log("INFO", "✅ 通道开关、权重等动态配置预加载完成。");
 
         // --- 核心段落 B: 预热通道健康指标 (Token、成功率、延迟 EMA) ---
-        log.info("🚀 [2/3] 系统启动：正在预热各通道历史健康指标 (Metrics Warmup)...");
+        traceLogger.log("INFO", "🚀 [2/3] 系统启动：正在预热各通道历史健康指标 (Metrics Warmup)...");
         
         // 1. 恢复 Token 账单
         String tokenSql = "SELECT channel_id, model, SUM(prompt_tokens) as p, SUM(completion_tokens) as c " +
@@ -98,10 +101,10 @@ public class MetricsInitializer implements CommandLineRunner {
                 }
             }
         }
-        log.info("✅ 各通道健康指标预热完成。累计恢复 Token 消耗: {}", totalTokensRecovered);
+        traceLogger.log("INFO", String.format("✅ 各通道健康指标预热完成。累计恢复 Token 消耗: %d", totalTokensRecovered));
 
         // --- 核心段落 C: 全局大盘初始化 (归档昨日数据 + 初始化内存计数器) ---
-        log.info("🚀 [3/3] 系统启动：正在同步全局历史概览与大盘计数器...");
+        traceLogger.log("INFO", "🚀 [3/3] 系统启动：正在同步全局历史概览与大盘计数器...");
         dailyStatsService.checkAndSyncMissing();
         
         try {
@@ -122,12 +125,12 @@ public class MetricsInitializer implements CommandLineRunner {
             );
 
             metricsRegistry.initGlobalStats(finalAvgDur, finalSuccess, finalTotal);
-            log.info("✅ 全局历史概览同步完成。总请求: {}, 平均响应: {} ms", finalTotal, finalAvgDur);
+            traceLogger.log("INFO", String.format("✅ 全局历史概览同步完成。总请求: %d, 平均响应: %d ms", finalTotal, finalAvgDur));
         } catch (Exception e) {
-            log.error("❌ 全局大盘初始化异常: {}", e.getMessage());
+            traceLogger.log("ERROR", "❌ 全局大盘初始化异常: " + e.getMessage());
         }
 
-        log.info("✨ OpenRouter 核心运行状态同步完毕，准备上线接收流量！");
+        traceLogger.log("INFO", "✨ OpenRouter 核心运行状态同步完毕，准备上线接收流量！");
     }
 
     private long parseLongSafely(Object val) {

@@ -4,6 +4,7 @@ import com.openrouter.config.RouterProperties;
 import com.openrouter.metrics.MetricsRegistry;
 import com.openrouter.adapter.impl.DynamicModelRoutingStrategy;
 import com.openrouter.metrics.ModelMetrics;
+import com.openrouter.trace.TraceLogger;
 import lombok.Builder;
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
@@ -27,13 +28,15 @@ public class AdminController {
     private final MetricsRegistry metricsRegistry;
     private final DynamicModelRoutingStrategy routingStrategy;
     private final JdbcTemplate jdbcTemplate;
+    private final TraceLogger traceLogger;
 
     public AdminController(RouterProperties routerProperties, MetricsRegistry metricsRegistry,
-            DynamicModelRoutingStrategy routingStrategy, JdbcTemplate jdbcTemplate) {
+            DynamicModelRoutingStrategy routingStrategy, JdbcTemplate jdbcTemplate, TraceLogger traceLogger) {
         this.routerProperties = routerProperties;
         this.metricsRegistry = metricsRegistry;
         this.routingStrategy = routingStrategy;
         this.jdbcTemplate = jdbcTemplate;
+        this.traceLogger = traceLogger;
     }
 
     @GetMapping("/dashboard")
@@ -108,6 +111,7 @@ public class AdminController {
         for (RouterProperties.Channel channel : channels) {
             if (channel.getId().equals(id)) {
                 channel.setEnabled(!channel.isEnabled());
+                traceLogger.log("INFO", String.format("🔌 渠道 %s [%s]", id, channel.isEnabled() ? "已开启" : "已关闭"));
                 updateChannelConfigAsync(channel);
                 return "SUCCESS";
             }
@@ -123,6 +127,7 @@ public class AdminController {
         for (RouterProperties.Channel channel : channels) {
             if (channel.getId().equals(id)) {
                 channel.setBaseWeight(val);
+                traceLogger.log("INFO", String.format("⚖️ 渠道 %s 权重已调整为: %d", id, val));
                 updateChannelConfigAsync(channel);
                 return "SUCCESS";
             }
@@ -140,7 +145,7 @@ public class AdminController {
                 int enabledInt = channel.isEnabled() ? 1 : 0;
                 jdbcTemplate.update(sql, channel.getId(), enabledInt, channel.getBaseWeight());
             } catch (Exception e) {
-                log.error("Failed to update channel_config for {}", channel.getId(), e);
+                traceLogger.log("ERROR", String.format("Failed to update channel_config for %s: %s", channel.getId(), e.getMessage()));
             }
         }).subscribeOn(Schedulers.boundedElastic()).subscribe();
     }

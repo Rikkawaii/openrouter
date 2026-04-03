@@ -110,20 +110,20 @@ public class LlmRouterService {
         if ("auto".equalsIgnoreCase(originalModel) && channel.getModels() != null && !channel.getModels().isEmpty()) {
             String selectedModel = selectCompatibleModel(request, channel);
             request.setModel(selectedModel);
-            log.info("🤖 auto 模式选定具体模型: {} (来自渠道: {})", selectedModel, channel.getId());
+            traceLogger.log("INFO", String.format("🤖 auto 模式选定具体模型: %s (来自渠道: %s)", selectedModel, channel.getId()));
         }
 
         if (request.getTraceContext() != null)
             traceLogger.log(request.getTraceContext(), "MODEL_CALL_START", "success",
                     "channel=" + channel.getId() + ", model=" + request.getModel());
 
-        log.info("🔀 [非流式] 正在尝试渠道: {} (已排除: {})", channel.getId(), excludedIds);
+        traceLogger.log("INFO", String.format("🔀 [非流式] 正在尝试渠道: %s (已排除: %s)", channel.getId(), excludedIds));
         LlmClientAdapter adapter = getAdapterForChannel(channel);
         final String channelId = channel.getId();
 
         return adapter.chat(request, channel)
                 .onErrorResume(e -> {
-                    log.warn("⚠️ 渠道 {} 调用失败 ({})，自动故障转移...", channelId, e.getMessage());
+                    traceLogger.log("WARN", String.format("⚠️ 渠道 %s 调用失败 (%s)，自动故障转移...", channelId, e.getMessage()));
                     if (request.getTraceContext() != null) {
                         request.getTraceContext().setRetryCount(request.getTraceContext().getRetryCount() + 1);
                         traceLogger.log(request.getTraceContext(), "MODEL_FAIL", "fail",
@@ -160,20 +160,20 @@ public class LlmRouterService {
         if ("auto".equalsIgnoreCase(originalModel) && channel.getModels() != null && !channel.getModels().isEmpty()) {
             String selectedModel = selectCompatibleModel(request, channel);
             request.setModel(selectedModel);
-//            log.info("🤖 auto 流式模式选定具体模型: {} (来自渠道: {})", selectedModel, channel.getId());
+            traceLogger.log("INFO", String.format("🤖 auto 流式模式选定具体模型: %s (来自渠道: %s)", selectedModel, channel.getId()));
         }
 
         if (request.getTraceContext() != null)
             traceLogger.log(request.getTraceContext(), "MODEL_CALL_START", "success",
                     "channel=" + channel.getId() + ", model=" + request.getModel() + ", stream=true");
 
-//        log.info("🔀 [流式] 正在尝试渠道: {} (已排除: {})", channel.getId(), excludedIds);
+        traceLogger.log("INFO", String.format("🔀 [流式] 正在尝试渠道: %s (已排除: %s)", channel.getId(), excludedIds));
         LlmClientAdapter adapter = getAdapterForChannel(channel);
         final String channelId = channel.getId();
         // todo: 根据错误类型来调整模型权重
         return adapter.streamChat(request, channel)
                 .onErrorResume(e -> {
-                    log.warn("⚠️ 流式渠道 {} 调用失败 ({})，自动故障转移...", channelId, e.toString());
+                    traceLogger.log("WARN", String.format("⚠️ 流式渠道 %s 调用失败 (%s)，自动故障转移...", channelId, e.toString()));
                     if (request.getTraceContext() != null) {
                         request.getTraceContext().setRetryCount(request.getTraceContext().getRetryCount() + 1);
                         traceLogger.log(request.getTraceContext(), "MODEL_FAIL", "fail",
@@ -230,8 +230,8 @@ public class LlmRouterService {
                     .filter(m -> capabilitiesProperties.getCapabilityForModel(m).isVision())
                     .findFirst()
                     .orElseGet(() -> {
-                        log.warn("⚠️ Channel {} 没有声明 vision 能力的模型，降级使用 index[0]: {}",
-                                channel.getId(), models.get(0));
+                        traceLogger.log("WARN", String.format("⚠️ Channel %s 没有声明 vision 能力的模型，降级使用 index[0]: %s",
+                                channel.getId(), models.get(0)));
                         return models.get(0);
                     });
         }

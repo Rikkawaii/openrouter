@@ -64,7 +64,7 @@ public class LlmRouterController {
         request.setTraceContext(ctx);
 
         traceLogger.separator(ctx.getTraceId());
-        log.info("📧 请求参数: -温度{}", request.getTemperature() == null ? 1.0 : request.getTemperature());
+//        traceLogger.log("📧 请求参数: -温度{}", request.getTemperature() == null ? 1.0 : request.getTemperature());
         traceLogger.log(ctx, "REQ_RECEIVED", "success",
                 "model=" + request.getModel() + ", stream=" + request.getStream());
 
