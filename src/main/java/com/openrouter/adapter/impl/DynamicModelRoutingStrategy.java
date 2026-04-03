@@ -100,17 +100,17 @@ public class DynamicModelRoutingStrategy implements ModelRoutingStrategy {
 
         // 【路由惩罚】使用近期错误惩罚值（随时间衰减, 不影响历史账本）
         double recentErrorCount = metrics.getRecentErrorCount();
-        long avgLatency = metrics.getAverageLatencyMs();
+        long avgDuration = metrics.getAverageModelLatencyMs();
         long concurrentCalls = metrics.getCurrentConcurrentCalls();
 
         // 黄金打分公式
         double finalScore = baseWeight
                 - (recentErrorCount * HEALTH_PENALTY_WEIGHT)
-                - (avgLatency * LATENCY_WEIGHT)
+                - (avgDuration * LATENCY_WEIGHT)
                 - (concurrentCalls * CONSECUTIVE_CALL_PENALTY);
 
-        log.debug("📊 打分详情 - 渠道: {}, 基础分: {}, 近期错误惩罚: {}, TTFT扣减: {}ms, 高流阻力: {}, -> 综合总得分为: {}",
-                channel.getId(), baseWeight, recentErrorCount, avgLatency, concurrentCalls, finalScore);
+        log.debug("📊 打分详情 - 渠道: {}, 基础分: {}, 近期错误惩罚: {}, 总耗时扣减: {}ms, 高流阻力: {}, -> 综合总得分为: {}",
+                channel.getId(), baseWeight, recentErrorCount, avgDuration, concurrentCalls, finalScore);
 
         return finalScore;
     }

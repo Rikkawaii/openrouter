@@ -46,13 +46,15 @@
             </div>
             <div class="flex items-center space-x-3 bg-slate-800/50 px-4 py-2 rounded-full border border-slate-700">
                 <span v-if="timeRange === 'realtime'" class="relative flex h-3 w-3">
-                    <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                    <span
+                        class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
                     <span class="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
                 </span>
                 <span v-else class="relative flex h-3 w-3">
                     <span class="relative inline-flex rounded-full h-3 w-3 bg-slate-500"></span>
                 </span>
-                <select v-model="timeRange" @change="handleTimeRangeChange" class="bg-transparent text-emerald-400 font-mono text-xs tracking-wider outline-none cursor-pointer appearance-none">
+                <select v-model="timeRange" @change="handleTimeRangeChange"
+                    class="bg-transparent text-emerald-400 font-mono text-xs tracking-wider outline-none cursor-pointer appearance-none">
                     <option value="realtime" class="bg-slate-800">LIVE SYNC : 2000MS</option>
                     <option value="1h" class="bg-slate-800">HISTORY : LAST 1 HOUR</option>
                     <option value="24h" class="bg-slate-800">HISTORY : LAST 24 HOURS</option>
@@ -77,8 +79,8 @@
                         class="w-4 h-4 mr-2 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                             d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path>
-                    </svg> Avg Global TTFT</h3>
-                <div class="text-4xl font-bold mt-3 text-amber-400 font-mono">{{ stats.avgGlobalLatency }}<span
+                    </svg> Avg System Latency (E2E)</h3>
+                <div class="text-4xl font-bold mt-3 text-amber-400 font-mono">{{ stats.avgResponseTime }}<span
                         class="text-lg text-slate-500 ml-1">ms</span></div>
             </div>
 
@@ -88,7 +90,8 @@
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                             d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"></path>
                     </svg> Global Tokens</h3>
-                <div class="text-4xl font-bold mt-3 text-purple-400 font-mono">{{ formatNumber(stats.globalTotalTokens) }}
+                <div class="text-4xl font-bold mt-3 text-purple-400 font-mono">{{ formatNumber(stats.globalTotalTokens)
+                    }}
                 </div>
                 <div class="mt-4 h-1.5 w-full bg-slate-800 rounded-full flex overflow-hidden">
                     <div :style="{width: getRatio(stats.globalPromptTokens, stats.globalTotalTokens) + '%'}"
@@ -101,13 +104,29 @@
                     <span>C: {{ formatNumber(stats.globalCompletionTokens) }}</span>
                 </div>
             </div>
-            <div class="glass-panel rounded-2xl p-6 transition transform hover:-translate-y-1">
+            <div class="glass-panel rounded-2xl p-6 transition transform hover:-translate-y-1 relative overflow-hidden">
                 <h3 class="text-slate-400 text-xs font-semibold uppercase tracking-wider flex items-center"><svg
                         class="w-4 h-4 mr-2 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                             d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4"></path>
-                    </svg> Total Call Routing</h3>
-                <div class="text-4xl font-bold mt-3 text-cyan-400 font-mono">{{ formatNumber(stats.globalTotalCalls) }}
+                    </svg> Global Request Activity</h3>
+                <div class="text-4xl font-bold mt-3 text-cyan-400 font-mono">{{ formatNumber(stats.globalTotalRequests)
+                    }}
+                </div>
+                <!-- 失败比例条 -->
+                <div class="mt-4 h-1.5 w-full bg-slate-800 rounded-full flex overflow-hidden">
+                    <div :style="{width: (100 - getRatio(stats.globalFailedRequests, stats.globalTotalRequests)) + '%'}"
+                        class="bg-emerald-400" title="Success"></div>
+                    <div :style="{width: getRatio(stats.globalFailedRequests, stats.globalTotalRequests) + '%'}"
+                        class="bg-red-400" title="Failed"></div>
+                </div>
+                <div class="flex justify-between mt-2 text-[10px] font-mono text-slate-500">
+                    <span class="text-emerald-400/80">SUCCESS: {{ formatNumber(stats.globalTotalRequests -
+                        stats.globalFailedRequests) }}</span>
+                    <span :class="stats.globalFailedRequests > 0 ? 'text-red-400' : 'text-slate-500'">
+                        FAIL: {{ formatNumber(stats.globalFailedRequests) }} ({{ getRatio(stats.globalFailedRequests,
+                        stats.globalTotalRequests) }}%)
+                    </span>
                 </div>
             </div>
         </div>
@@ -117,7 +136,7 @@
             <div>
                 <h2 class="text-2xl font-bold text-slate-200">Channel Matrix</h2>
                 <div class="text-sm text-amber-500/80 font-mono mt-1 font-semibold tracking-wide">
-                    Live Score = BaseWeight - (RecentErrors × 10) - (TTFT × 0.05) - (Streams × 5)
+                    Live Score = BaseWeight - (RecentErrors × 10) - (ModelLatency × 0.05) - (Concurrent × 5)
                 </div>
             </div>
         </div>
@@ -135,9 +154,6 @@
                     <div>
                         <h3 class="text-xl font-bold text-white truncate max-w-[200px]" :title="ch.id">{{ ch.id }}</h3>
                         <div class="text-[11px] font-mono text-slate-400 mt-1">
-                            Total Calls: <span class="text-emerald-400 font-semibold">{{ formatNumber(ch.totalCalls) }}
-                            </span>
-                            <span class="mx-2 text-slate-700">|</span>
                             Score: <span class="text-amber-400 font-bold text-sm">{{ ch.currentScore.toFixed(1)
                                 }}</span>
                         </div>
@@ -160,38 +176,46 @@
                 </div>
 
                 <div class="grid grid-cols-2 gap-3 mb-6 z-10 relative">
-                    <div class="bg-slate-900/60 rounded-xl p-4 border border-slate-700/50">
+                    <div class="bg-slate-900/60 rounded-xl p-4 border border-slate-700/50 col-span-2">
                         <div class="flex justify-between items-center mb-1">
-                            <span class="text-xs text-slate-500 uppercase font-semibold">TTFT</span>
-                            <span class="text-[9px] text-slate-600 uppercase">Total</span>
+                            <span class="text-xs text-slate-500 uppercase font-semibold text-emerald-400/80">Model
+                                Latency (Backend)</span>
+                            <span class="text-[9px] text-slate-600 uppercase font-mono">Success EMA</span>
                         </div>
-                        <div class="flex justify-between items-baseline">
-                            <div class="text-xl font-mono" :class="ch.avgLatencyMs > 2000 ? 'text-red-400' : (ch.avgLatencyMs > 800 ? 'text-amber-400' : 'text-emerald-400')">
-                                {{ ch.avgLatencyMs }}<span class="text-[10px] ml-0.5 text-slate-600">ms</span>
-                            </div>
-                            <div class="text-xs font-mono text-slate-400">
-                                {{ ch.avgTotalDurationMs }}ms
+                        <div class="flex items-baseline space-x-2">
+                            <div class="text-3xl font-bold font-mono text-white">
+                                {{ ch.avgModelLatencyMs }}<span class="text-sm ml-1 text-slate-600">ms</span>
                             </div>
                         </div>
                     </div>
-                    <div class="bg-slate-900/60 rounded-xl p-4 border border-slate-700/50">
-                        <div class="text-xs text-slate-500 uppercase font-semibold mb-1">Errors</div>
-                        <div class="text-xl font-mono"
-                            :class="ch.errorCount > 0 ? 'text-red-400 font-bold' : 'text-slate-300'">{{ ch.errorCount }}
+                    <div class="bg-slate-900/60 rounded-xl p-3 border border-slate-700/50">
+                        <div class="text-[10px] text-slate-500 uppercase font-semibold mb-1 text-emerald-400/80">Total
+                            Calls</div>
+                        <div class="text-xl font-mono text-white">{{ formatNumber(ch.totalCalls) }}</div>
+                    </div>
+                    <div class="bg-slate-900/60 rounded-xl p-3 border border-slate-700/50">
+                        <div class="text-[10px] text-slate-500 uppercase font-semibold mb-1 text-red-400/80">Total
+                            Errors</div>
+                        <div class="text-xl font-mono" :class="ch.errorCount > 0 ? 'text-red-400' : 'text-slate-300'">{{
+                            formatNumber(ch.errorCount) }}
                         </div>
                     </div>
-                    <div class="bg-slate-900/60 rounded-xl p-4 border border-slate-700/50 relative">
+                    <div class="bg-slate-900/60 rounded-xl p-3 border border-slate-700/50 col-span-2 relative">
                         <div v-if="ch.currentConcurrentCalls > 0"
-                            class="absolute top-2 right-2 w-2 h-2 rounded-full bg-blue-400 animate-ping"></div>
-                        <div class="text-xs text-slate-500 uppercase font-semibold mb-1">Streams</div>
-                        <div class="text-xl font-mono text-cyan-300">{{ ch.currentConcurrentCalls }}</div>
-                    </div>
-                    <div class="bg-slate-900/60 rounded-xl p-4 border border-slate-700/50">
-                        <div class="text-xs text-slate-500 uppercase font-semibold mb-1 text-purple-400">Tokens Split
+                            class="absolute top-2 right-4 w-2.5 h-2.5 rounded-full bg-cyan-400 animate-ping"></div>
+                        <div class="flex justify-between items-center">
+                            <span class="text-[10px] text-slate-500 uppercase font-semibold">Active Concurrent</span>
+                            <span class="text-xl font-mono text-cyan-300">{{ ch.currentConcurrentCalls }}</span>
                         </div>
-                        <div class="text-[13px] font-mono leading-tight">
-                            <div class="text-blue-400">P: {{ formatNumber(ch.promptTokensUsed) }}</div>
-                            <div class="text-purple-400">C: {{ formatNumber(ch.completionTokensUsed) }}</div>
+                    </div>
+                    <div class="bg-slate-900/60 rounded-xl p-4 border border-slate-700/50 col-span-2">
+                        <div class="text-xs text-slate-500 uppercase font-semibold mb-1 text-purple-400">Tokens
+                            Distribution
+                        </div>
+                        <div class="flex justify-between items-center font-mono">
+                            <span class="text-blue-400 text-sm">P: {{ formatNumber(ch.promptTokensUsed) }}</span>
+                            <span class="text-purple-400 text-sm">C: {{ formatNumber(ch.completionTokensUsed) }}</span>
+                            <span class="text-slate-400 text-[10px]">Σ {{ formatNumber(ch.totalTokensUsed) }}</span>
                         </div>
                     </div>
                 </div>
@@ -206,8 +230,10 @@
                             <span class="text-[11px] text-slate-400 font-mono truncate max-w-[120px]"
                                 :title="modelName">{{ modelName }}</span>
                             <div class="text-right">
-                                <div class="text-[11px] font-mono font-bold text-slate-200">Σ {{ formatNumber(pair.t) }}</div>
-                                <div class="text-[9px] font-mono text-slate-500">P: {{ formatNumber(pair.p) }} / C: {{ formatNumber(pair.c) }}</div>
+                                <div class="text-[11px] font-mono font-bold text-slate-200">Σ {{ formatNumber(pair.t) }}
+                                </div>
+                                <div class="text-[9px] font-mono text-slate-500">P: {{ formatNumber(pair.p) }} / C: {{
+                                    formatNumber(pair.c) }}</div>
                             </div>
                         </div>
                     </div>
@@ -238,7 +264,7 @@
                 const stats = ref({
                     totalChannels: 0, activeChannels: 0,
                     globalTotalTokens: 0, globalPromptTokens: 0, globalCompletionTokens: 0,
-                    globalTotalCalls: 0, globalErrors: 0, avgGlobalLatency: 0
+                    globalTotalRequests: 0, globalFailedRequests: 0, avgGlobalLatency: 0
                 })
                 const channels = ref([])
                 const timeRange = ref('realtime')
@@ -247,8 +273,13 @@
                 const fetchData = async () => {
                     try {
                         const res = await axios.get('/api/admin/dashboard')
-                        stats.value = res.data.globalStats
 
+                        // 🌍 只有在实时模式下才更新大盘统计，历史模式下由 fetchRangeData 负责
+                        if (timeRange.value === 'realtime') {
+                            stats.value = res.data.globalStats
+                        }
+
+                        // 🃏 卡片数据固定显示全部历史数据统计（实时同步）
                         if (channels.value.length === 0) {
                             channels.value = res.data.channels;
                         } else {
@@ -256,8 +287,7 @@
                                 const oldCh = channels.value.find(c => c.id === newCh.id);
                                 if (oldCh) {
                                     oldCh.enabled = newCh.enabled;
-                                    oldCh.avgLatencyMs = newCh.avgLatencyMs;
-                                    oldCh.avgTotalDurationMs = newCh.avgTotalDurationMs;
+                                    oldCh.avgModelLatencyMs = newCh.avgModelLatencyMs;
                                     oldCh.errorCount = newCh.errorCount;
                                     oldCh.currentConcurrentCalls = newCh.currentConcurrentCalls;
                                     oldCh.totalTokensUsed = newCh.totalTokensUsed;
@@ -289,64 +319,9 @@
                     }
 
                     try {
+                        // 历史模式下仅更新大盘 Stats，Cards 由 fetchData 继续同步全量数据
                         const res = await axios.get(`/api/admin/stats/range?start=${formatISO(start)}&end=${formatISO(end)}`)
-                        const rangeData = res.data
-                        
-                        let gTokens = 0, gPrompt = 0, gComp = 0, gCalls = 0, gErrors = 0, sumLat = 0, activeCount = 0;
-                        
-                        channels.value.forEach(ch => {
-                            const modelStats = rangeData.filter(r => r.channelId === ch.id)
-                            if (modelStats.length > 0) {
-                                ch.totalTokensUsed = modelStats.reduce((sum, r) => sum + (r.total || 0), 0)
-                                ch.promptTokensUsed = modelStats.reduce((sum, r) => sum + (r.p || 0), 0)
-                                ch.completionTokensUsed = modelStats.reduce((sum, r) => sum + (r.c || 0), 0)
-                                ch.totalCalls = modelStats.reduce((sum, r) => sum + (r.totalCalls || 0), 0)
-                                ch.errorCount = modelStats.reduce((sum, r) => sum + (r.errorCount || 0), 0)
-                                
-                                const latSum = modelStats.reduce((sum, r) => sum + ((r.avgLat || 0) * (r.totalCalls || 0)), 0)
-                                ch.avgLatencyMs = ch.totalCalls > 0 ? Math.round(latSum / ch.totalCalls) : 0
-                                
-                                const durSum = modelStats.reduce((sum, r) => sum + ((r.avgDur || 0) * (r.totalCalls || 0)), 0)
-                                ch.avgTotalDurationMs = ch.totalCalls > 0 ? Math.round(durSum / ch.totalCalls) : 0
-                                
-                                ch.currentConcurrentCalls = 0
-                                ch.tokensByModel = {}
-                                modelStats.forEach(r => {
-                                    if (r.model) {
-                                        ch.tokensByModel[r.model] = {
-                                            t: r.total || 0,
-                                            p: r.p || 0,
-                                            c: r.c || 0
-                                        }
-                                    }
-                                })
-                                
-                                gTokens += ch.totalTokensUsed
-                                gPrompt += ch.promptTokensUsed
-                                gComp += ch.completionTokensUsed
-                                gCalls += ch.totalCalls
-                                gErrors += ch.errorCount
-                                if (ch.avgLatencyMs > 0) {
-                                    sumLat += ch.avgLatencyMs
-                                    activeCount++
-                                }
-                            } else {
-                                ch.totalTokensUsed = 0; ch.promptTokensUsed = 0; ch.completionTokensUsed = 0;
-                                ch.totalCalls = 0; ch.errorCount = 0; ch.avgLatencyMs = 0; ch.avgTotalDurationMs = 0;
-                                ch.currentConcurrentCalls = 0; ch.tokensByModel = {};
-                            }
-                        })
-                        
-                        stats.value = {
-                            totalChannels: channels.value.length,
-                            activeChannels: channels.value.filter(c => c.enabled).length,
-                            globalTotalTokens: gTokens,
-                            globalPromptTokens: gPrompt,
-                            globalCompletionTokens: gComp,
-                            globalTotalCalls: gCalls,
-                            globalErrors: gErrors,
-                            avgGlobalLatency: activeCount > 0 ? Math.round(sumLat / activeCount) : 0
-                        }
+                        stats.value = res.data
                     } catch (e) {
                         console.error('Failed fetching range data', e)
                     }

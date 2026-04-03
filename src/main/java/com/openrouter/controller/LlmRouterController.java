@@ -1,16 +1,16 @@
 package com.openrouter.controller;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.openrouter.config.RouterProperties;
 import com.openrouter.model.ChatCompletionRequest;
 import com.openrouter.service.LlmRouterService;
+import com.openrouter.trace.RequestTraceContext;
+import com.openrouter.trace.TraceLogger;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.util.StringUtils;
 import org.springframework.web.bind.annotation.*;
-
-import java.util.Collections;
 
 //curl http://localhost:8080/v1/chat/completions \
 // -H "Content-Type: application/json" \
@@ -28,10 +28,15 @@ public class LlmRouterController {
 
     private final LlmRouterService llmRouterService;
     private final RouterProperties routerProperties;
+    private final TraceLogger traceLogger;
+    private final ObjectMapper objectMapper;
 
-    public LlmRouterController(LlmRouterService llmRouterService, RouterProperties routerProperties) {
+    public LlmRouterController(LlmRouterService llmRouterService, RouterProperties routerProperties,
+            TraceLogger traceLogger, ObjectMapper objectMapper) {
         this.llmRouterService = llmRouterService;
         this.routerProperties = routerProperties;
+        this.traceLogger = traceLogger;
+        this.objectMapper = objectMapper;
     }
 
     /**
@@ -43,27 +48,39 @@ public class LlmRouterController {
             @RequestBody ChatCompletionRequest request,
             @RequestHeader(value = "Authorization", required = false) String authHeader) {
 
-        // 🛡️ API Key 鉴权
-        String expectedKey = routerProperties.getApiKey();
-        if (StringUtils.hasText(expectedKey)) {
-            if (authHeader == null || !authHeader.replace("Bearer ", "").trim().equals(expectedKey.trim())) {
-                log.warn("🚨 拦截到未授权的非法请求: authHeader={}", authHeader);
-                return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
-                        .body(Collections.singletonMap("error", "Unauthorized access to router endpoint."));
+        // 🔍 创建请求全链路追踪上下文
+        RequestTraceContext ctx = new RequestTraceContext();
+        try {
+            // 只保存最后一条消息的 role 和 content 摘要，避免存储大量冗余历史上下文
+            var messages = request.getMessages();
+            if (messages != null && !messages.isEmpty()) {
+                var last = messages.get(messages.size() - 1);
+                ctx.setFullRequestJson(objectMapper.writeValueAsString(
+                        java.util.Map.of("role", last.getRole() != null ? last.getRole() : "",
+                                "content", last.getContent() != null ? last.getContent().toString() : "")));
             }
+        } catch (Exception ignored) {
         }
+        request.setTraceContext(ctx);
+
+        traceLogger.separator(ctx.getTraceId());
+        log.info("📧 请求参数: -温度{}", request.getTemperature() == null ? 1.0 : request.getTemperature());
+        traceLogger.log(ctx, "REQ_RECEIVED", "success",
+                "model=" + request.getModel() + ", stream=" + request.getStream());
 
         // 🎓 导师规则：无历史上下文（发新对话）时，强制重定向给高智商的导师模型首发
-        // 判断标准优化：只要消息列表中不存在 role 为 assistant 的消息，即代表这是首轮对话（兼容带 system 提示词的场景）
-        if (request.getMessages() != null && request.getMessages().stream().noneMatch(m -> "assistant".equalsIgnoreCase(m.getRole()))) {
+        if ("auto".equalsIgnoreCase(request.getModel()) && request.getMessages() != null
+                && request.getMessages().stream().noneMatch(m -> "assistant".equalsIgnoreCase(m.getRole()))) {
             String mentor = routerProperties.getMentorModel();
-            if (org.springframework.util.StringUtils.hasText(mentor)) {
-                log.info("🎓 触发导师规则：首轮对话无历史记忆，请求由 {} 强制重定向至导师模型 {}", request.getModel(), mentor);
+            if (StringUtils.hasText(mentor)) {
+                traceLogger.log(ctx, "MENTOR_RULE_APPLIED", "success",
+                        "originalModel=" + request.getModel() + " -> mentorModel=" + mentor);
                 request.setModel(mentor);
             }
         }
-        log.info(request.toString());
-        log.info("📧 收到 Chat 请求: model={}, stream={}", request.getModel(), request.getStream());
+
+        // log.info("📧 收到 Chat 请求: model={}, stream={}", request.getModel(),
+        // request.getStream());
 
         if (Boolean.TRUE.equals(request.getStream())) {
             // 关键点：流式返回必须显式指定 MediaType.TEXT_EVENT_STREAM，

@@ -10,7 +10,9 @@ import com.openrouter.metrics.ModelMetrics;
 import com.openrouter.model.ChatCompletionMessage;
 import com.openrouter.model.ChatCompletionRequest;
 import com.openrouter.model.ChatCompletionResponse;
-import com.openrouter.service.UsageLogger;
+import com.openrouter.trace.RequestTraceContext;
+import com.openrouter.service.UsageDatabaseService;
+import com.openrouter.trace.TraceLogger;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
@@ -22,7 +24,6 @@ import reactor.core.publisher.SignalType;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -33,18 +34,21 @@ public class GeminiLlmAdapter implements LlmClientAdapter {
     private final WebClient webClient;
     private final ObjectMapper objectMapper;
     private final MetricsRegistry metricsRegistry;
-    private final UsageLogger usageLogger;
+    private final TraceLogger traceLogger;
+    private final UsageDatabaseService usageDatabaseService;
 
     private static final String geminiFunctionThoughtSignature = "skip_thought_signature_validator";
 
     private static final Pattern PROMPT_PATTERN = Pattern.compile("\"prompt_tokens\"\\s*:\\s*(\\d+)");
     private static final Pattern COMPLETION_PATTERN = Pattern.compile("\"completion_tokens\"\\s*:\\s*(\\d+)");
 
-    public GeminiLlmAdapter(WebClient routerWebClient, ObjectMapper objectMapper, MetricsRegistry metricsRegistry, UsageLogger usageLogger) {
+    public GeminiLlmAdapter(WebClient routerWebClient, ObjectMapper objectMapper,
+                            MetricsRegistry metricsRegistry, TraceLogger traceLogger, UsageDatabaseService usageDatabaseService) {
         this.webClient = routerWebClient;
         this.objectMapper = objectMapper;
         this.metricsRegistry = metricsRegistry;
-        this.usageLogger = usageLogger;
+        this.traceLogger = traceLogger;
+        this.usageDatabaseService = usageDatabaseService;
     }
 
     @Override
@@ -60,11 +64,16 @@ public class GeminiLlmAdapter implements LlmClientAdapter {
 
     @Override
     public Flux<String> streamChat(ChatCompletionRequest request, RouterProperties.Channel channel) {
-        // 模型代号已经在 Service 层基于 models 列表装配完毕
         String model = request.getModel();
         String url = channel.getBaseUrl() + "/v1beta/models/" + model + ":streamGenerateContent?alt=sse";
         String geminiJsonBody = convertToGeminiRequest(request);
         ModelMetrics metrics = metricsRegistry.getMetrics(channel.getId());
+        RequestTraceContext ctx = request.getTraceContext();
+
+        // 🧊 提前冻结快照，防止重试逻辑修改 request 后读到错误值
+        final String targetModel = model;
+        final String targetChannelId = channel.getId();
+        final long startTime = System.currentTimeMillis();
 
         return webClient.post()
                 .uri(url)
@@ -86,36 +95,31 @@ public class GeminiLlmAdapter implements LlmClientAdapter {
                 .doOnSubscribe(s -> {
                     metrics.incrementConcurrent();
                     metrics.recordCall();
+                    // 🧊 最早时机注入：在任何 doFinally 触发之前，model/channelId 已就绪
+                    if (ctx != null) {
+                        ctx.setModel(targetModel);
+                        ctx.setChannelId(targetChannelId);
+                    }
                 })
                 .transform(flux -> {
-                    long startTime = System.currentTimeMillis();
                     AtomicBoolean first = new AtomicBoolean(true);
-                    // 维护请求级别的增量水位线
                     AtomicLong lastP = new AtomicLong(0);
                     AtomicLong lastC = new AtomicLong(0);
-                    AtomicLong ttft = new AtomicLong(0);
-                    AtomicReference<String> errorMsg = new AtomicReference<>(null);
 
                     return flux.doOnNext(item -> {
                         if (first.compareAndSet(true, false)) {
-                            long firstLat = System.currentTimeMillis() - startTime;
-                            ttft.set(firstLat);
-                            metrics.recordLatency(firstLat);
+                            if (ctx != null)
+                                traceLogger.log(ctx, "FIRST_TOKEN", "success", "");
                         }
 
-                        // 只有包含 usage 的报文才触发解析
                         if (item != null && item.contains("\"usage\":{")) {
                             try {
-                                // 1. 正则极速提取当前总量（含累计数）
                                 long curP = queryToken(item, PROMPT_PATTERN);
                                 long curC = queryToken(item, COMPLETION_PATTERN);
-                                // 2. 计算本次报文相对于上次的增量
                                 long deltaP = Math.max(0, curP - lastP.get());
                                 long deltaC = Math.max(0, curC - lastC.get());
                                 if (deltaP > 0 || deltaC > 0) {
-                                    // 3. 仅记录增量部分
-                                    metrics.addTokens(model, deltaP, deltaC);
-                                    // 4. 更新水位线
+                                    metrics.addTokens(targetModel, deltaP, deltaC);
                                     lastP.set(curP);
                                     lastC.set(curC);
                                 }
@@ -123,14 +127,24 @@ public class GeminiLlmAdapter implements LlmClientAdapter {
                             }
                         }
                     })
-                    .doOnError(e -> errorMsg.set(e.getMessage()))
-                    .doFinally(sig -> {
-                        long totalDuration = System.currentTimeMillis() - startTime;
-                        metrics.recordTotalDuration(totalDuration);
-                        boolean success = sig != SignalType.ON_ERROR;
-                        usageLogger.recordLogAsync(channel.getId(), request.getModel(), lastP.get(), lastC.get(), 
-                                                   ttft.get(), totalDuration, success, errorMsg.get());
-                    });
+                            .doFinally(sig -> {
+                                long callDuration = System.currentTimeMillis() - startTime;
+                                boolean success = (sig == SignalType.ON_COMPLETE);
+                                // model_call_log：每次底层尝试都记录
+                                usageDatabaseService.saveCallLogAsync(ctx, targetChannelId, targetModel, callDuration, success, sig == SignalType.ON_ERROR ? "Stream error" : null);
+
+                                if (success && ctx != null) {
+                                    // ✅ 此处是 tokens 数据就绪的最早时机
+                                    ctx.setPromptTokens(lastP.get());
+                                    ctx.setCompletionTokens(lastC.get());
+                                    ctx.setFullResponseJson("{\"usage\":{\"prompt_tokens\":" + lastP.get() + ",\"completion_tokens\":" + lastC.get() + "}}");
+                                    metrics.recordModelLatency(callDuration);
+                                    traceLogger.log(ctx, "FULL_RESPONSE", "success",
+                                            "响应完整接收,Token消耗:p=" + lastP.get() + ", c=" + lastC.get());
+                                    // ✅ request_log：在 tokens 确认后立即落库（此时 ctx 完整）
+                                    usageDatabaseService.saveRequestLogAsync(ctx, true, null);
+                                }
+                            });
                 })
                 .doOnError(e -> metrics.recordError())
                 .doFinally(sig -> metrics.decrementConcurrent());
@@ -146,7 +160,6 @@ public class GeminiLlmAdapter implements LlmClientAdapter {
                 return objectMapper.writeValueAsString(finalBody);
             }
 
-            // First pass: Build tool_call_id to function_name map
             Map<String, String> toolCallIdToName = new HashMap<>();
             for (ChatCompletionMessage msg : messages) {
                 if ("assistant".equalsIgnoreCase(msg.getRole()) && msg.getToolCalls() != null) {
@@ -157,7 +170,6 @@ public class GeminiLlmAdapter implements LlmClientAdapter {
                     }
                 }
             }
-            // 将openai中的messages转换为gemini的systemInstruction和contents
             List<Map<String, Object>> contents = new ArrayList<>();
             List<Map<String, Object>> systemParts = new ArrayList<>();
 
@@ -166,7 +178,6 @@ public class GeminiLlmAdapter implements LlmClientAdapter {
                 boolean isSystem = "system".equalsIgnoreCase(role) || "developer".equalsIgnoreCase(role);
 
                 if (isSystem && messages.size() > 1) {
-                    // 添加gemini特有的systemInstruction
                     addParts(systemParts, msg, null, toolCallIdToName);
                     continue;
                 }
@@ -174,13 +185,12 @@ public class GeminiLlmAdapter implements LlmClientAdapter {
                 Map<String, Object> contentMap = new LinkedHashMap<>();
                 String geminiRole;
                 if ("tool".equalsIgnoreCase(role)) {
-                    geminiRole = "user"; // Gemini use 'user' role for tool responses
+                    geminiRole = "user";
                 } else if ("assistant".equalsIgnoreCase(role)) {
                     geminiRole = "model";
                 } else {
                     geminiRole = "user";
                 }
-                // 添加gemini的contents的每一part
                 contentMap.put("role", geminiRole);
 
                 List<Map<String, Object>> parts = new ArrayList<>();
@@ -192,15 +202,12 @@ public class GeminiLlmAdapter implements LlmClientAdapter {
 
             if (!systemParts.isEmpty()) {
                 Map<String, Object> systemInstruction = new LinkedHashMap<>();
-                // systemInstruction.put("role", "system"); // Recent Gemini versions use
-                // "system" or omit role
                 systemInstruction.put("parts", systemParts);
                 finalBody.put("systemInstruction", systemInstruction);
             }
 
             finalBody.put("contents", contents);
 
-            // Generation Config
             Map<String, Object> generationConfig = new LinkedHashMap<>();
             if (request.getTemperature() != null)
                 generationConfig.put("temperature", request.getTemperature());
@@ -211,19 +218,16 @@ public class GeminiLlmAdapter implements LlmClientAdapter {
             if (request.getMaxTokens() != null)
                 generationConfig.put("maxOutputTokens", request.getMaxTokens());
 
-            // OpenAI 'n' parameter -> candidateCount
             if (request.getN() != null && request.getN() > 1) {
                 generationConfig.put("candidateCount", request.getN());
             }
 
-            // reasoning_effort -> thinkingConfig (For Gemini 2.0 Thinking models)
             if (request.getReasoningEffort() != null) {
                 Map<String, Object> thinkingConfig = new HashMap<>();
                 String effort = request.getReasoningEffort().toLowerCase();
                 if ("auto".equals(effort)) {
                     thinkingConfig.put("thinkingBudget", -1);
                 } else {
-                    // Gemini uses thinkingLevel: "low", "medium", "high"
                     thinkingConfig.put("thinkingLevel", effort);
                 }
                 thinkingConfig.put("includeThoughts", !"none".equals(effort));
@@ -234,7 +238,6 @@ public class GeminiLlmAdapter implements LlmClientAdapter {
                 finalBody.put("generationConfig", generationConfig);
             }
 
-            // Tools Mapping
             if (request.getTools() != null && !request.getTools().isEmpty()) {
                 List<Map<String, Object>> functionDeclarations = new ArrayList<>();
                 for (ChatCompletionRequest.Tool tool : request.getTools()) {
@@ -254,7 +257,6 @@ public class GeminiLlmAdapter implements LlmClientAdapter {
                 }
             }
 
-            // Tool Choice (Tool Config)
             if (request.getToolChoice() != null) {
                 Map<String, Object> toolConfig = new LinkedHashMap<>();
                 Map<String, Object> functionCallingConfig = new LinkedHashMap<>();
@@ -267,7 +269,6 @@ public class GeminiLlmAdapter implements LlmClientAdapter {
                 } else if ("required".equals(choice)) {
                     functionCallingConfig.put("mode", "ANY");
                 } else if (choice instanceof Map) {
-                    // Specific function: {"type": "function", "function": {"name": "my_func"}}
                     functionCallingConfig.put("mode", "ANY");
                     @SuppressWarnings("unchecked")
                     Map<String, Object> choiceMap = (Map<String, Object>) choice;
@@ -294,14 +295,12 @@ public class GeminiLlmAdapter implements LlmClientAdapter {
             Map<String, String> toolCallIdToName) {
         Object content = msg.getContent();
 
-        // 1. Tool Call handling (for assistant messages)
         if (msg.getToolCalls() != null && !msg.getToolCalls().isEmpty()) {
             for (ChatCompletionMessage.ToolCall tc : msg.getToolCalls()) {
                 if (tc.getFunction() != null) {
                     Map<String, Object> functionCall = new LinkedHashMap<>();
                     functionCall.put("name", tc.getFunction().getName());
                     try {
-                        // Gemini expects parameters as a JSON object, OpenAI sends as string
                         String args = tc.getFunction().getArguments();
                         if (args != null && !args.isEmpty()) {
                             functionCall.put("args", objectMapper.readTree(args));
@@ -317,22 +316,17 @@ public class GeminiLlmAdapter implements LlmClientAdapter {
             }
         }
 
-        // 2. Tool Response handling (for role=tool)
         if ("tool".equalsIgnoreCase(role)) {
             Map<String, Object> functionResponse = new LinkedHashMap<>();
-            // Gemini requires the actual function name in the 'name' field, not the call ID
             String functionName = toolCallIdToName != null ? toolCallIdToName.get(msg.getToolCallId()) : null;
             if (functionName == null) {
-                // Fallback to the ID if mapping fails (though Gemini might reject this)
                 functionName = msg.getToolCallId();
             }
             functionResponse.put("name", functionName);
 
             Map<String, Object> responseContent = new HashMap<>();
-            // todo: 优化
             if (content instanceof String) {
                 try {
-                    // Try to parse tool response as JSON if it's a string, Gemini prefers objects
                     responseContent.put("content", objectMapper.readTree((String) content));
                 } catch (Exception e) {
                     responseContent.put("content", content);
@@ -345,7 +339,6 @@ public class GeminiLlmAdapter implements LlmClientAdapter {
             return;
         }
 
-        // 3. Normal content handling
         if (content == null)
             return;
 
@@ -368,7 +361,6 @@ public class GeminiLlmAdapter implements LlmClientAdapter {
                     String url = imageUrlObj != null ? imageUrlObj.get("url") : null;
                     if (url != null) {
                         if (url.startsWith("data:")) {
-                            // Base64 mapping: data:image/jpeg;base64,xxxx
                             int commaIdx = url.indexOf(',');
                             if (commaIdx > 5) {
                                 String header = url.substring(5, commaIdx);
@@ -378,19 +370,16 @@ public class GeminiLlmAdapter implements LlmClientAdapter {
                                 inlineData.put("mimeType", mimeType);
                                 inlineData.put("data", base64Data);
                                 targetParts.add(Collections.singletonMap("inlineData", inlineData));
-                                targetParts.add(
-                                        Collections.singletonMap("thoughtSignature", geminiFunctionThoughtSignature));
+                                targetParts.add(Collections.singletonMap("thoughtSignature", geminiFunctionThoughtSignature));
                             }
                         } else {
-                            // Remote URL: fileData
                             Map<String, Object> fileData = new LinkedHashMap<>();
-                            fileData.put("mimeType", "image/jpeg"); // Default to jpeg for remote URLs
+                            fileData.put("mimeType", "image/jpeg");
                             fileData.put("fileUri", url);
                             targetParts.add(Collections.singletonMap("fileData", fileData));
                         }
                     }
                 } else if ("file".equals(type)) {
-                    // Support for file parts from the model
                     Map<String, String> fileObj = (Map<String, String>) part.get("file");
                     if (fileObj != null) {
                         String fileData = fileObj.get("file_data");
@@ -400,7 +389,6 @@ public class GeminiLlmAdapter implements LlmClientAdapter {
                             String mimeType = "application/octet-stream";
                             if (filename != null && filename.contains(".")) {
                                 String ext = filename.substring(filename.lastIndexOf(".") + 1).toLowerCase();
-                                // Simple mapping
                                 mimeType = switch (ext) {
                                     case "pdf" -> "application/pdf";
                                     case "png" -> "image/png";
@@ -426,12 +414,10 @@ public class GeminiLlmAdapter implements LlmClientAdapter {
 
         JsonNode root = objectMapper.readTree(rawJson);
 
-        // 1. Extract generic metadata
         String responseId = root.path("responseId").asText("chatcmpl-" + UUID.randomUUID());
         long created = System.currentTimeMillis() / 1000;
         if (root.has("createTime")) {
             try {
-                // 2024-03-27T18:30:45.123Z
                 String createTime = root.path("createTime").asText();
                 created = java.time.Instant.parse(createTime).getEpochSecond();
             } catch (Exception ignored) {
@@ -454,7 +440,6 @@ public class GeminiLlmAdapter implements LlmClientAdapter {
                     for (JsonNode part : parts) {
                         if (part.has("text")) {
                             String text = part.get("text").asText();
-                            // Gemini 2.0 Thinking: If part has "thought": true, map to reasoning_content
                             if (part.path("thought").asBoolean(false)) {
                                 delta.setReasoningContent(text);
                             } else {
@@ -482,7 +467,7 @@ public class GeminiLlmAdapter implements LlmClientAdapter {
                 }
 
                 if (delta.getContent() == null && delta.getReasoningContent() == null && finishReason == null) {
-                    continue; // Skip empty chunks unless it's a finish chunk
+                    continue;
                 }
 
                 choices.add(ChatCompletionResponse.Choice.builder()
@@ -493,7 +478,6 @@ public class GeminiLlmAdapter implements LlmClientAdapter {
             }
         }
 
-        // 2. Map Usage if available in this chunk
         ChatCompletionResponse.Usage usage = null;
         JsonNode usageNode = root.path("usageMetadata");
         if (!usageNode.isMissingNode()) {
@@ -511,8 +495,7 @@ public class GeminiLlmAdapter implements LlmClientAdapter {
                             ? ChatCompletionResponse.PromptTokensDetails.builder().cachedTokens(cachedTokens).build()
                             : null)
                     .completionTokensDetails(reasoningTokens > 0
-                            ? ChatCompletionResponse.CompletionTokensDetails.builder().reasoningTokens(reasoningTokens)
-                                    .build()
+                            ? ChatCompletionResponse.CompletionTokensDetails.builder().reasoningTokens(reasoningTokens).build()
                             : null)
                     .build();
         }

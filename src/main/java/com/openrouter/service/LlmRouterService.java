@@ -1,17 +1,22 @@
 package com.openrouter.service;
 
+import com.openrouter.metrics.MetricsRegistry;
+
 import com.openrouter.adapter.LlmClientAdapter;
 import com.openrouter.adapter.ModelRoutingStrategy;
 import com.openrouter.config.ModelCapabilitiesProperties;
 import com.openrouter.config.RouterProperties;
 import com.openrouter.model.ChatCompletionRequest;
 import com.openrouter.model.ChatCompletionResponse;
+import com.openrouter.trace.RequestTraceContext;
+import com.openrouter.trace.TraceLogger;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.util.*;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -24,26 +29,60 @@ public class LlmRouterService {
     private final RouterProperties routerProperties;
     private final RequestCapabilityDetector capabilityDetector;
     private final ModelCapabilitiesProperties capabilitiesProperties;
+    private final TraceLogger traceLogger;
+    private final UsageDatabaseService usageDatabaseService;
+    private final MetricsRegistry metricsRegistry;
 
     public LlmRouterService(List<LlmClientAdapter> adapters,
-                            ModelRoutingStrategy routingStrategy,
-                            RouterProperties routerProperties,
-                            RequestCapabilityDetector capabilityDetector,
-                            ModelCapabilitiesProperties capabilitiesProperties) {
+                             ModelRoutingStrategy routingStrategy,
+                             RouterProperties routerProperties,
+                             RequestCapabilityDetector capabilityDetector,
+                             ModelCapabilitiesProperties capabilitiesProperties,
+                             TraceLogger traceLogger,
+                             UsageDatabaseService usageDatabaseService,
+                             MetricsRegistry metricsRegistry) {
         this.protocolAdapters = adapters.stream()
                 .collect(Collectors.toMap(LlmClientAdapter::getProtocolType, a -> a));
         this.routingStrategy = routingStrategy;
         this.routerProperties = routerProperties;
         this.capabilityDetector = capabilityDetector;
         this.capabilitiesProperties = capabilitiesProperties;
+        this.traceLogger = traceLogger;
+        this.usageDatabaseService = usageDatabaseService;
+        this.metricsRegistry = metricsRegistry;
     }
 
     public Mono<ChatCompletionResponse> chat(ChatCompletionRequest request) {
-        return chatWithFallback(request, new HashSet<>());
+        RequestTraceContext ctx = request.getTraceContext();
+        return chatWithFallback(request, new HashSet<>())
+                .doOnError(e -> {
+                    // 非流式错误记录已经在 chatWithFallback 的 onErrorResume 里记入 trace 了
+                })
+                .doFinally(sig -> {
+                    boolean success = sig == reactor.core.publisher.SignalType.ON_COMPLETE;
+                    usageDatabaseService.saveRequestLogAsync(ctx, success, null);
+                    if (ctx != null) {
+                        metricsRegistry.recordGlobalResponse(ctx.getTotalDurationMs(), success);
+                    }
+                });
     }
 
     public Flux<String> streamChat(ChatCompletionRequest request) {
-        return streamChatWithFallback(request, new HashSet<>());
+        RequestTraceContext ctx = request.getTraceContext();
+        AtomicReference<String> errorMsg = new AtomicReference<>(null);
+        return streamChatWithFallback(request, new HashSet<>())
+                .doOnError(e -> errorMsg.set(e.getMessage()))
+                .doFinally(sig -> {
+                    boolean success = sig == reactor.core.publisher.SignalType.ON_COMPLETE;
+                    if (ctx != null) {
+                        metricsRegistry.recordGlobalResponse(ctx.getTotalDurationMs(), success);
+                    }
+                    // ✅ 成功时 request_log 已由 Adapter 内层 doFinally 落库（tokens 就绪）
+                    // ❌ 失败时兑底写入 error 记录
+                    if (!success) {
+                        usageDatabaseService.saveRequestLogAsync(ctx, false, errorMsg.get());
+                    }
+                });
     }
 
     // ==================== 带自动故障转移的核心执行方法 ====================
@@ -57,16 +96,26 @@ public class LlmRouterService {
             String msg = excludedIds.isEmpty()
                     ? "No available channel for model: " + request.getModel()
                     : "All channels exhausted after " + excludedIds.size() + " failures. Giving up.";
+            if (request.getTraceContext() != null) {
+                traceLogger.log(request.getTraceContext(), "ALL_FAILED", "error", msg);
+                // 也要确保 ALL_FAILED 时 ctx 里的 model 有值（取原始请求的）
+                if (request.getTraceContext().getModel() == null) {
+                    request.getTraceContext().setModel(request.getModel());
+                }
+            }
             return Mono.error(new RuntimeException(msg));
         }
 
-        // auto 模式：智能选一个满足请求能力要求的模型，而不是盲目取 index[0]
         String originalModel = request.getModel();
         if ("auto".equalsIgnoreCase(originalModel) && channel.getModels() != null && !channel.getModels().isEmpty()) {
             String selectedModel = selectCompatibleModel(request, channel);
             request.setModel(selectedModel);
             log.info("🤖 auto 模式选定具体模型: {} (来自渠道: {})", selectedModel, channel.getId());
         }
+
+        if (request.getTraceContext() != null)
+            traceLogger.log(request.getTraceContext(), "MODEL_CALL_START", "success",
+                    "channel=" + channel.getId() + ", model=" + request.getModel());
 
         log.info("🔀 [非流式] 正在尝试渠道: {} (已排除: {})", channel.getId(), excludedIds);
         LlmClientAdapter adapter = getAdapterForChannel(channel);
@@ -75,7 +124,11 @@ public class LlmRouterService {
         return adapter.chat(request, channel)
                 .onErrorResume(e -> {
                     log.warn("⚠️ 渠道 {} 调用失败 ({})，自动故障转移...", channelId, e.getMessage());
-                    // 把原始 model 还原，以便下一个 channel 做 auto 注入时能重新选模型
+                    if (request.getTraceContext() != null) {
+                        request.getTraceContext().setRetryCount(request.getTraceContext().getRetryCount() + 1);
+                        traceLogger.log(request.getTraceContext(), "MODEL_FAIL", "fail",
+                                "channel=" + channelId + ", reason=" + e.getMessage());
+                    }
                     request.setModel(originalModel);
                     Set<String> newExcluded = new HashSet<>(excludedIds);
                     newExcluded.add(channelId);
@@ -94,6 +147,12 @@ public class LlmRouterService {
             String msg = excludedIds.isEmpty()
                     ? "No available channel for model: " + request.getModel()
                     : "All channels exhausted after " + excludedIds.size() + " failures. Giving up.";
+            if (request.getTraceContext() != null) {
+                traceLogger.log(request.getTraceContext(), "ALL_FAILED", "error", msg);
+                if (request.getTraceContext().getModel() == null) {
+                    request.getTraceContext().setModel(request.getModel());
+                }
+            }
             return Flux.error(new RuntimeException(msg));
         }
 
@@ -101,17 +160,25 @@ public class LlmRouterService {
         if ("auto".equalsIgnoreCase(originalModel) && channel.getModels() != null && !channel.getModels().isEmpty()) {
             String selectedModel = selectCompatibleModel(request, channel);
             request.setModel(selectedModel);
-            log.info("🤖 auto 流式模式选定具体模型: {} (来自渠道: {})", selectedModel, channel.getId());
+//            log.info("🤖 auto 流式模式选定具体模型: {} (来自渠道: {})", selectedModel, channel.getId());
         }
 
-        log.info("🔀 [流式] 正在尝试渠道: {} (已排除: {})", channel.getId(), excludedIds);
+        if (request.getTraceContext() != null)
+            traceLogger.log(request.getTraceContext(), "MODEL_CALL_START", "success",
+                    "channel=" + channel.getId() + ", model=" + request.getModel() + ", stream=true");
+
+//        log.info("🔀 [流式] 正在尝试渠道: {} (已排除: {})", channel.getId(), excludedIds);
         LlmClientAdapter adapter = getAdapterForChannel(channel);
         final String channelId = channel.getId();
-
+        // todo: 根据错误类型来调整模型权重
         return adapter.streamChat(request, channel)
                 .onErrorResume(e -> {
                     log.warn("⚠️ 流式渠道 {} 调用失败 ({})，自动故障转移...", channelId, e.toString());
-                    e.printStackTrace();
+                    if (request.getTraceContext() != null) {
+                        request.getTraceContext().setRetryCount(request.getTraceContext().getRetryCount() + 1);
+                        traceLogger.log(request.getTraceContext(), "MODEL_FAIL", "fail",
+                                "channel=" + channelId + ", reason=" + e.getMessage());
+                    }
                     request.setModel(originalModel);
                     Set<String> newExcluded = new HashSet<>(excludedIds);
                     newExcluded.add(channelId);
@@ -134,14 +201,16 @@ public class LlmRouterService {
                 .filter(c -> !excludedIds.contains(c.getId()))
                 .collect(Collectors.toList());
 
-        if (candidates.isEmpty()) return null;
+        if (candidates.isEmpty())
+            return null;
         return routingStrategy.selectChannel(request, candidates);
     }
 
     private LlmClientAdapter getAdapterForChannel(RouterProperties.Channel channel) {
         LlmClientAdapter adapter = protocolAdapters.get(channel.getType());
         if (adapter == null) {
-            throw new RuntimeException("Protocol adapter translator [" + channel.getType() + "] not found for channel: " + channel.getId());
+            throw new RuntimeException("Protocol adapter translator [" + channel.getType() + "] not found for channel: "
+                    + channel.getId());
         }
         return adapter;
     }

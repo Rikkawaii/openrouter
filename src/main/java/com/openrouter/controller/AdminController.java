@@ -41,19 +41,14 @@ public class AdminController {
         List<ChannelView> channelViews = new ArrayList<>();
         List<RouterProperties.Channel> channels = routerProperties.getChannels();
 
-        int channelsWithSamples = 0;
         long globalTotalTokens = 0;
         long globalPromptTokens = 0;
         long globalCompletionTokens = 0;
-        long globalTotalCalls = 0;
-        long globalErrors = 0;
         int activeCount = 0;
-        long latencySum = 0;
 
         if (channels != null) {
             for (RouterProperties.Channel channel : channels) {
                 ModelMetrics metrics = metricsRegistry.getMetrics(channel.getId());
-                long avgLat = metrics.getAverageLatencyMs();
 
                 ChannelView view = ChannelView.builder()
                         .id(channel.getId())
@@ -62,8 +57,7 @@ public class AdminController {
                         .models(channel.getModels() != null ? String.join(", ", channel.getModels()) : "")
                         .enabled(channel.isEnabled())
                         .baseWeight(channel.getBaseWeight())
-                        .avgLatencyMs(avgLat)
-                        .avgTotalDurationMs(metrics.getAverageTotalDurationMs())
+                        .avgModelLatencyMs(metrics.getAverageModelLatencyMs())
                         .errorCount(metrics.getErrorCount())
                         .currentConcurrentCalls(metrics.getCurrentConcurrentCalls())
                         .totalTokensUsed(metrics.getTotalTokensUsed())
@@ -80,18 +74,14 @@ public class AdminController {
                 globalTotalTokens += metrics.getTotalTokensUsed();
                 globalPromptTokens += metrics.getPromptTokensUsed();
                 globalCompletionTokens += metrics.getCompletionTokensUsed();
-                globalTotalCalls += metrics.getTotalCalls();
-                globalErrors += metrics.getErrorCount();
                 if (channel.isEnabled())
                     activeCount++;
-
-                // 只有产生过延迟采样的渠道，才计入大盘平均分，避免被初始 0 值带偏
-                if (avgLat > 0) {
-                    latencySum += avgLat;
-                    channelsWithSamples++;
-                }
             }
         }
+
+        long totalRequests = metricsRegistry.getGlobalTotalRequests();
+        long successRequests = metricsRegistry.getGlobalSuccessCount();
+        long failedRequests = Math.max(0, totalRequests - successRequests);
 
         GlobalStats stats = GlobalStats.builder()
                 .totalChannels(channels == null ? 0 : channels.size())
@@ -99,9 +89,9 @@ public class AdminController {
                 .globalTotalTokens(globalTotalTokens)
                 .globalPromptTokens(globalPromptTokens)
                 .globalCompletionTokens(globalCompletionTokens)
-                .globalTotalCalls(globalTotalCalls)
-                .globalErrors(globalErrors)
-                .avgGlobalLatency(channelsWithSamples > 0 ? (latencySum / channelsWithSamples) : 0)
+                .globalTotalRequests(totalRequests)
+                .globalFailedRequests(failedRequests)
+                .avgResponseTime(metricsRegistry.getGlobalAverageResponseTime())
                 .build();
 
         return DashboardResponse.builder()
@@ -144,9 +134,9 @@ public class AdminController {
         Mono.fromRunnable(() -> {
             try {
                 String sql = "INSERT INTO channel_config (channel_id, enabled, base_weight) " +
-                             "VALUES (?, ?, ?) " +
-                             "ON CONFLICT(channel_id) DO UPDATE SET " +
-                             "enabled=excluded.enabled, base_weight=excluded.base_weight";
+                        "VALUES (?, ?, ?) " +
+                        "ON CONFLICT(channel_id) DO UPDATE SET " +
+                        "enabled=excluded.enabled, base_weight=excluded.base_weight";
                 int enabledInt = channel.isEnabled() ? 1 : 0;
                 jdbcTemplate.update(sql, channel.getId(), enabledInt, channel.getBaseWeight());
             } catch (Exception e) {
@@ -156,29 +146,135 @@ public class AdminController {
     }
 
     @GetMapping("/stats/range")
-    public Mono<List<Map<String, Object>>> getRangeStats(
+    public Mono<GlobalStats> getRangeStats(
             @RequestParam String start,
             @RequestParam String end) {
-        // SQLite datetime('now', 'localtime') outputs format 'YYYY-MM-DD HH:MM:SS'
-        // Spring's incoming ISO string has a 'T', which is mathematically > ' ', causing BETWEEN queries to fail.
-        String startStr = start.replace("T", " ");
-        String endStr = end.replace("T", " ");
+        return Mono.fromCallable(() -> {
+            // ISO-8601 strings usually look like 2026-03-27T17:15:30
+            // We want to slice this into calendar boundaries
+            String startStr = start.replace("T", " ");
+            String endStr = end.replace("T", " ");
+            
+            java.time.LocalDateTime startDt = java.time.LocalDateTime.parse(start.substring(0, 19));
+            java.time.LocalDateTime endDt = java.time.LocalDateTime.parse(end.substring(0, 19));
+            java.time.LocalDate dStart = startDt.toLocalDate();
+            java.time.LocalDate dEnd = endDt.toLocalDate();
 
-        String sql = "SELECT channel_id as channelId, model, " +
-                     "SUM(prompt_tokens) as p, " +
-                     "SUM(completion_tokens) as c, " +
-                     "SUM(total_tokens) as total, " +
-                     "COUNT(1) as totalCalls, " +
-                     "SUM(CASE WHEN success=1 THEN 1 ELSE 0 END) as successCount, " +
-                     "SUM(CASE WHEN success=0 THEN 1 ELSE 0 END) as errorCount, " +
-                     "AVG(NULLIF(ttft_ms, 0)) as avgLat, " +
-                     "AVG(total_duration_ms) as avgDur " +
-                     "FROM usage_log " +
-                     "WHERE created_at BETWEEN ? AND ? " +
-                     "GROUP BY channel_id, model";
-                     
-        return Mono.fromCallable(() -> jdbcTemplate.queryForList(sql, startStr, endStr))
-                   .subscribeOn(Schedulers.boundedElastic());
+            StatAccumulator accumulator = new StatAccumulator();
+
+            if (dStart.equals(dEnd)) {
+                // 情况 1: 同一自然日内，直接查原始日志
+                accumulator.addFromLogs(fetchLogStats(startStr, endStr));
+            } else {
+                // 情况 2: 跨天，分三段合并以利用 daily_stats 缓存
+                
+                // 1. 起始日残缺段 (start -> 23:59:59)
+                String startDayEnd = dStart.format(java.time.format.DateTimeFormatter.ISO_LOCAL_DATE) + " 23:59:59";
+                accumulator.addFromLogs(fetchLogStats(startStr, startDayEnd));
+
+                // 2. 中间整日段 (dStart + 1 -> dEnd - 1)
+                java.time.LocalDate midStart = dStart.plusDays(1);
+                java.time.LocalDate midEnd = dEnd.minusDays(1);
+                if (!midStart.isAfter(midEnd)) {
+                    List<Map<String, Object>> dailyList = jdbcTemplate.queryForList(
+                        "SELECT * FROM daily_stats WHERE stat_date BETWEEN ? AND ?", 
+                        midStart.toString(), midEnd.toString());
+                    for (Map<String, Object> day : dailyList) {
+                        accumulator.addFromDaily(day);
+                    }
+                }
+
+                // 3. 结束日头段 (00:00:00 -> end)
+                String endDayStart = dEnd.format(java.time.format.DateTimeFormatter.ISO_LOCAL_DATE) + " 00:00:00";
+                accumulator.addFromLogs(fetchLogStats(endDayStart, endStr));
+            }
+
+            return GlobalStats.builder()
+                    .globalTotalRequests(accumulator.totalRequests)
+                    .globalFailedRequests(accumulator.failedRequests)
+                    .globalTotalTokens(accumulator.totalTokens)
+                    .globalPromptTokens(accumulator.promptTokens)
+                    .globalCompletionTokens(accumulator.completionTokens)
+                    .avgResponseTime(accumulator.getFinalAvg())
+                    .totalChannels(routerProperties.getChannels().size())
+                    .activeChannels((int) routerProperties.getChannels().stream().filter(RouterProperties.Channel::isEnabled).count())
+                    .build();
+        }).subscribeOn(Schedulers.boundedElastic());
+    }
+
+    private Map<String, Object> fetchLogStats(String start, String end) {
+        String sql = "SELECT " +
+                "AVG(total_duration_ms) as avg_duration, " +
+                "SUM(prompt_tokens) as prompt_tokens, " +
+                "SUM(completion_tokens) as completion_tokens, " +
+                "SUM(total_tokens) as total_tokens, " +
+                "COUNT(1) as total_requests, " +
+                "SUM(CASE WHEN success=0 THEN 1 ELSE 0 END) as failed_requests " +
+                "FROM request_log " +
+                "WHERE created_at BETWEEN ? AND ? ";
+        return jdbcTemplate.queryForMap(sql, start, end);
+    }
+
+    private class StatAccumulator {
+        long totalRequests = 0;
+        long failedRequests = 0;
+        long promptTokens = 0;
+        long completionTokens = 0;
+        long totalTokens = 0;
+        double weightedAvgSum = 0;
+        long totalSuccessCount = 0;
+
+        void addFromLogs(Map<String, Object> r) {
+            long reqs = parseLongSafely(r.get("total_requests"));
+            if (reqs == 0) return;
+            
+            long failed = parseLongSafely(r.get("failed_requests"));
+            long success = Math.max(0, reqs - failed);
+            long avg = parseLongSafely(r.get("avg_duration"));
+
+            this.totalRequests += reqs;
+            this.failedRequests += failed;
+            this.promptTokens += parseLongSafely(r.get("prompt_tokens"));
+            this.completionTokens += parseLongSafely(r.get("completion_tokens"));
+            this.totalTokens += parseLongSafely(r.get("total_tokens"));
+            
+            if (success > 0) {
+                this.weightedAvgSum += (avg * success);
+                this.totalSuccessCount += success;
+            }
+        }
+
+        void addFromDaily(Map<String, Object> r) {
+            long reqs = parseLongSafely(r.get("total_requests"));
+            long failed = parseLongSafely(r.get("failed_requests"));
+            long success = Math.max(0, reqs - failed);
+            long avg = parseLongSafely(r.get("avg_duration"));
+
+            this.totalRequests += reqs;
+            this.failedRequests += failed;
+            this.promptTokens += parseLongSafely(r.get("prompt_tokens"));
+            this.completionTokens += parseLongSafely(r.get("completion_tokens"));
+            this.totalTokens += parseLongSafely(r.get("total_tokens"));
+
+            if (success > 0) {
+                this.weightedAvgSum += (avg * success);
+                this.totalSuccessCount += success;
+            }
+        }
+
+        long getFinalAvg() {
+            return totalSuccessCount == 0 ? 0 : (long) (weightedAvgSum / totalSuccessCount);
+        }
+    }
+
+    private long parseLongSafely(Object val) {
+        if (val == null) return 0L;
+        if (val instanceof Number) return ((Number) val).longValue();
+        try {
+            return Long.parseLong(val.toString());
+        } catch (Exception e) {
+            return 0L;
+        }
     }
 
     @Data
@@ -196,9 +292,9 @@ public class AdminController {
         private long globalTotalTokens;
         private long globalPromptTokens;
         private long globalCompletionTokens;
-        private long globalTotalCalls;
-        private long globalErrors;
-        private long avgGlobalLatency;
+        private long globalTotalRequests;
+        private long globalFailedRequests;
+        private long avgResponseTime;
     }
 
     @Data
@@ -210,8 +306,7 @@ public class AdminController {
         private String models;
         private boolean enabled;
         private int baseWeight;
-        private long avgLatencyMs;
-        private long avgTotalDurationMs;
+        private long avgModelLatencyMs;
         private long errorCount;
         private long currentConcurrentCalls;
         private long totalTokensUsed;

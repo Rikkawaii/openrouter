@@ -34,6 +34,13 @@
             <artifactId>sqlite-jdbc</artifactId>
             <version>3.45.1.0</version>
         </dependency>
+        
+            <!-- Spring Boot Starter Test (包含 @SpringBootTest) -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
 
         <dependency>
             <groupId>org.projectlombok</groupId>

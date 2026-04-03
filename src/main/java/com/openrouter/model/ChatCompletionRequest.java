@@ -1,6 +1,8 @@
 package com.openrouter.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.openrouter.trace.RequestTraceContext;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -15,6 +17,10 @@ import java.util.List;
 public class ChatCompletionRequest {
     private String model;
     private List<ChatCompletionMessage> messages;
+
+    /** 请求级别的全链路追踪上下文，由 Controller 创建并随 request 对象传递，不参与 JSON 序列化 */
+    @JsonIgnore
+    private RequestTraceContext traceContext;
     private Boolean stream;
     private Double temperature;
     

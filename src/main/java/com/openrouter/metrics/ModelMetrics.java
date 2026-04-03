@@ -17,10 +17,8 @@ public class ModelMetrics {
 
     private volatile int baseWeight = 100;
 
-    private final AtomicLong averageLatencyMs = new AtomicLong(0);
-    private final AtomicLong averageTotalDurationMs = new AtomicLong(0);
+    private final AtomicLong averageModelLatencyMs = new AtomicLong(0);
     private final AtomicLong latencySampleCount = new AtomicLong(0);
-    private final AtomicLong totalDurationSampleCount = new AtomicLong(0);
 
     private final AtomicLong errorCount = new AtomicLong(0);
     private final AtomicLong recentErrorCount = new AtomicLong(0);
@@ -63,24 +61,24 @@ public class ModelMetrics {
     /**
      * 兼容旧版或无法区分输入输出的场景数据恢复
      */
-    public void addTokens(String model, long tokens) {
-        totalTokensUsed.addAndGet(tokens);
-        if (model != null && !model.isBlank()) {
-            TokenPair pair = tokensByModel.computeIfAbsent(model, k -> new TokenPair());
-            // 默认全记入 prompt 保证总量对齐
-            pair.prompt.addAndGet(tokens);
-        }
-    }
+    // public void addTokens(String model, long tokens) {
+    // totalTokensUsed.addAndGet(tokens);
+    // if (model != null && !model.isBlank()) {
+    // TokenPair pair = tokensByModel.computeIfAbsent(model, k -> new TokenPair());
+    // // 默认全记入 prompt 保证总量对齐
+    // pair.prompt.addAndGet(tokens);
+    // }
+    // }
 
-    public void addTokens(long tokens) {
-        totalTokensUsed.addAndGet(tokens);
-    }
+    // public void addTokens(long tokens) {
+    // totalTokensUsed.addAndGet(tokens);
+    // }
 
-    public void addTokens(long prompt, long completion) {
-        promptTokensUsed.addAndGet(prompt);
-        completionTokensUsed.addAndGet(completion);
-        totalTokensUsed.addAndGet(prompt + completion);
-    }
+    // public void addTokens(long prompt, long completion) {
+    // promptTokensUsed.addAndGet(prompt);
+    // completionTokensUsed.addAndGet(completion);
+    // totalTokensUsed.addAndGet(prompt + completion);
+    // }
 
     public long getTotalTokensUsed() {
         return totalTokensUsed.get();
@@ -107,6 +105,11 @@ public class ModelMetrics {
         totalCalls.incrementAndGet();
     }
 
+    public void recordCalls(long count) {
+        if (count > 0)
+            totalCalls.addAndGet(count);
+    }
+
     public long getTotalCalls() {
         return totalCalls.get();
     }
@@ -123,35 +126,20 @@ public class ModelMetrics {
         this.baseWeight = baseWeight;
     }
 
-    public long getAverageLatencyMs() {
-        return averageLatencyMs.get();
+    public long getAverageModelLatencyMs() {
+        return averageModelLatencyMs.get();
     }
 
-    public long getAverageTotalDurationMs() {
-        return averageTotalDurationMs.get();
-    }
-
-    public void recordLatency(long latencyMs) {
-        if (latencyMs <= 0) return; // ignore 0 for non-streaming requests
-        long currentAvg = averageLatencyMs.get();
+    public void recordModelLatency(long durationMs) {
+        if (durationMs <= 0)
+            return;
+        long currentAvg = averageModelLatencyMs.get();
         latencySampleCount.incrementAndGet();
         if (currentAvg == 0) {
-            averageLatencyMs.set(latencyMs);
-        } else {
-            long newAvg = (long) (currentAvg * 0.7 + latencyMs * 0.3);
-            averageLatencyMs.set(newAvg);
-        }
-    }
-
-    public void recordTotalDuration(long durationMs) {
-        if (durationMs <= 0) return;
-        long currentAvg = averageTotalDurationMs.get();
-        totalDurationSampleCount.incrementAndGet();
-        if (currentAvg == 0) {
-            averageTotalDurationMs.set(durationMs);
+            averageModelLatencyMs.set(durationMs);
         } else {
             long newAvg = (long) (currentAvg * 0.7 + durationMs * 0.3);
-            averageTotalDurationMs.set(newAvg);
+            averageModelLatencyMs.set(newAvg);
         }
     }
 
@@ -166,6 +154,13 @@ public class ModelMetrics {
     public void recordError() {
         errorCount.incrementAndGet();
         recentErrorCount.incrementAndGet();
+    }
+
+    // 初始化时只记录 errorCount
+    public void recordErrors(long count) {
+        if (count > 0) {
+            errorCount.addAndGet(count);
+        }
     }
 
     public void decayErrors() {

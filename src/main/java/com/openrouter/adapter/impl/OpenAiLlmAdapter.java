@@ -6,7 +6,9 @@ import com.openrouter.metrics.MetricsRegistry;
 import com.openrouter.metrics.ModelMetrics;
 import com.openrouter.model.ChatCompletionRequest;
 import com.openrouter.model.ChatCompletionResponse;
-import com.openrouter.service.UsageLogger;
+import com.openrouter.service.UsageDatabaseService;
+import com.openrouter.trace.RequestTraceContext;
+import com.openrouter.trace.TraceLogger;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
@@ -17,7 +19,6 @@ import reactor.core.publisher.SignalType;
 
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -27,15 +28,18 @@ public class OpenAiLlmAdapter implements LlmClientAdapter {
 
     private final WebClient webClient;
     private final MetricsRegistry metricsRegistry;
-    private final UsageLogger usageLogger;
-    
+    private final TraceLogger traceLogger;
+    private final UsageDatabaseService usageDatabaseService;
+
     private static final Pattern PROMPT_PATTERN = Pattern.compile("\"prompt_tokens\"\\s*:\\s*(\\d+)");
     private static final Pattern COMPLETION_PATTERN = Pattern.compile("\"completion_tokens\"\\s*:\\s*(\\d+)");
 
-    public OpenAiLlmAdapter(WebClient routerWebClient, MetricsRegistry metricsRegistry, UsageLogger usageLogger) {
+    public OpenAiLlmAdapter(WebClient routerWebClient, MetricsRegistry metricsRegistry,
+            TraceLogger traceLogger, UsageDatabaseService usageDatabaseService) {
         this.webClient = routerWebClient;
         this.metricsRegistry = metricsRegistry;
-        this.usageLogger = usageLogger;
+        this.traceLogger = traceLogger;
+        this.usageDatabaseService = usageDatabaseService;
     }
 
     @Override
@@ -46,9 +50,9 @@ public class OpenAiLlmAdapter implements LlmClientAdapter {
     @Override
     public Mono<ChatCompletionResponse> chat(ChatCompletionRequest request, RouterProperties.Channel channel) {
         request.setStream(false);
-        // 模型代号已经在 Service 层装配完毕
 
         ModelMetrics metrics = metricsRegistry.getMetrics(channel.getId());
+        RequestTraceContext ctx = request.getTraceContext();
         long startTime = System.currentTimeMillis();
 
         return webClient.post()
@@ -61,22 +65,36 @@ public class OpenAiLlmAdapter implements LlmClientAdapter {
                 .doOnSubscribe(s -> {
                     metrics.incrementConcurrent();
                     metrics.recordCall();
+                    if (ctx != null) {
+                        ctx.setModel(request.getModel());
+                        ctx.setChannelId(channel.getId());
+                    }
                 })
                 .doOnNext(res -> {
                     long duration = System.currentTimeMillis() - startTime;
-                    metrics.recordTotalDuration(duration);
+                    usageDatabaseService.saveCallLogAsync(ctx, channel.getId(), request.getModel(), duration, true, null);
+                    
                     long p = 0, c = 0;
                     if (res.getUsage() != null) {
                         p = res.getUsage().getPromptTokens();
                         c = res.getUsage().getCompletionTokens();
                         metrics.addTokens(request.getModel(), p, c);
                     }
-                    usageLogger.recordLogAsync(channel.getId(), request.getModel(), p, c, 0, duration, true, null);
+                    if (ctx != null) {
+                        ctx.setPromptTokens(p);
+                        ctx.setCompletionTokens(c);
+                        metrics.recordModelLatency(duration);
+                        ctx.setFullResponseJson(
+                                "{\"usage\":{\"prompt_tokens\":" + p + ",\"completion_tokens\":" + c + "}}");
+                        traceLogger.log(ctx, "FULL_RESPONSE", "success",
+                                "响应完整接收,Token消耗:" + "p=" + p + ", c=" + c);
+                    }
                 })
                 .doOnError(e -> {
-                    metrics.recordError();
                     long duration = System.currentTimeMillis() - startTime;
-                    usageLogger.recordLogAsync(channel.getId(), request.getModel(), 0, 0, duration, duration, false, e.getMessage());
+                    usageDatabaseService.saveCallLogAsync(ctx, channel.getId(), request.getModel(), duration, false, e.getMessage());
+                    // 错误不在此处记录日志：Service 层的 onErrorResume 会触发 MODEL_FAIL，流转下一个渠道重试
+                    metrics.recordError();
                 })
                 .doFinally(sig -> metrics.decrementConcurrent());
     }
@@ -84,15 +102,16 @@ public class OpenAiLlmAdapter implements LlmClientAdapter {
     @Override
     public Flux<String> streamChat(ChatCompletionRequest request, RouterProperties.Channel channel) {
         request.setStream(true);
-        // 模型代号已经在 Service 层装配完毕
         if (request.getStreamOptions() == null) {
             request.setStreamOptions(ChatCompletionRequest.StreamOptions.builder().includeUsage(true).build());
         }
 
         ModelMetrics metrics = metricsRegistry.getMetrics(channel.getId());
-        // 设置了响应头为MediaType.TEXT_EVENT_STREAM,则会自行将响应内容的"data"以及换行符去除，拿到每个data的json以流的形式返回给controller
-        // 如果controller设置了返回类型为MediaType.TEXT_EVENT_STREAM,则会把每个流数据再次使用data包装！（以此返回原生的openai
-        // sse流格式）
+        RequestTraceContext ctx = request.getTraceContext();
+        
+        final String targetModel = request.getModel(); // 🧊 抓取当前模型快照，防止异步副作用
+        final String targetChannelId = channel.getId();
+
         return webClient.post()
                 .uri(channel.getBaseUrl() + "/v1/chat/completions")
                 .header("Authorization", "Bearer " + channel.getApiKey())
@@ -104,20 +123,22 @@ public class OpenAiLlmAdapter implements LlmClientAdapter {
                 .doOnSubscribe(s -> {
                     metrics.incrementConcurrent();
                     metrics.recordCall();
+                    // 🧊 最早时机注入：在任何 doFinally 触发之前，model/channelId 已就绪
+                    if (ctx != null) {
+                        ctx.setModel(targetModel);
+                        ctx.setChannelId(targetChannelId);
+                    }
                 })
                 .transform(flux -> {
                     long startTime = System.currentTimeMillis();
                     AtomicBoolean first = new AtomicBoolean(true);
-                    AtomicLong ttft = new AtomicLong(0);
                     AtomicLong lastP = new AtomicLong(0);
                     AtomicLong lastC = new AtomicLong(0);
-                    AtomicReference<String> errorMsg = new AtomicReference<>(null);
 
                     return flux.doOnNext(item -> {
                         if (first.compareAndSet(true, false)) {
-                            long firstLat = System.currentTimeMillis() - startTime;
-                            ttft.set(firstLat);
-                            metrics.recordLatency(firstLat);
+                            if (ctx != null)
+                                traceLogger.log(ctx, "FIRST_TOKEN", "success", "");
                         }
                         if (item.contains("\"usage\":{")) {
                             try {
@@ -126,7 +147,7 @@ public class OpenAiLlmAdapter implements LlmClientAdapter {
                                 if (m1.find() && m2.find()) {
                                     long p = Long.parseLong(m1.group(1));
                                     long c = Long.parseLong(m2.group(1));
-                                    metrics.addTokens(request.getModel(), p, c);
+                                    metrics.addTokens(targetModel, p, c);
                                     lastP.set(p);
                                     lastC.set(c);
                                 }
@@ -134,18 +155,33 @@ public class OpenAiLlmAdapter implements LlmClientAdapter {
                             }
                         }
                     })
-                    .doOnError(e -> errorMsg.set(e.getMessage()))
-                    .doFinally(sig -> {
-                        long totalDuration = System.currentTimeMillis() - startTime;
-                        metrics.recordTotalDuration(totalDuration);
-                        boolean success = sig != SignalType.ON_ERROR;
-                        usageLogger.recordLogAsync(channel.getId(), request.getModel(), lastP.get(), lastC.get(), 
-                                                   ttft.get(), totalDuration, success, errorMsg.get());
-                    });
+                            .doFinally(sig -> {
+                                long callDuration = System.currentTimeMillis() - startTime;
+                                boolean success = (sig == SignalType.ON_COMPLETE);
+                                // model_call_log：每次底层尝试都记录
+                                usageDatabaseService.saveCallLogAsync(ctx, targetChannelId, targetModel, callDuration, success, sig == SignalType.ON_ERROR ? "Stream error" : null);
+
+                                if (success && ctx != null) {
+                                    // ✅ 此处是 tokens 数据就绪的最早时机
+                                    ctx.setPromptTokens(lastP.get());
+                                    ctx.setCompletionTokens(lastC.get());
+                                    ctx.setFullResponseJson("{\"usage\":{\"prompt_tokens\":" + lastP.get()
+                                            + ",\"completion_tokens\":" + lastC.get() + "}}");
+                                    metrics.recordModelLatency(callDuration);
+                                    traceLogger.log(ctx, "FULL_RESPONSE", "success",
+                                            "响应完整接收,Token消耗:p=" + lastP.get() + ", c=" + lastC.get());
+                                    // ✅ request_log：在 tokens 确认后立即落库（此时 ctx 完整）
+                                    usageDatabaseService.saveRequestLogAsync(ctx, true, null);
+                                }
+                            });
                 })
-                .doOnError(e -> {
-                    metrics.recordError();
-                })
+                .doOnError(e -> metrics.recordError())
                 .doFinally(sig -> metrics.decrementConcurrent());
+    }
+
+    public String buildUrl(String baseUrl, String path) {
+        if (baseUrl == null)
+            return path;
+        return baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) + path : baseUrl + path;
     }
 }
