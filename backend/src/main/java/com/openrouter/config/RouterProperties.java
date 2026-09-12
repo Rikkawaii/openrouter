@@ -24,4 +24,7 @@ public class RouterProperties {
 
     // 导师规则：无上下文时优先指派的模型
     private String mentorModel;
+
+    // 路由打分参数（引导值；运行时以 channels.json 的 settings.routing 为准）
+    private RoutingConfig routing = new RoutingConfig();
 }

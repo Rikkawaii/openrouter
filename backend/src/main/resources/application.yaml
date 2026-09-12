@@ -17,3 +17,18 @@ openrouter:
   # 或在管理页「基础设置」「渠道与模型」中调整，保存后热生效。
   # 可选：配置文件路径，默认 backend/config/channels.json
   # config-file: backend/config/channels.json
+
+  # 路由打分参数（引导值）：此处修改需重启；运行时以 channels.json 的
+  # settings.routing 段为准，可在管理页「基础设置 → 路由调参」中热更。
+  # routing:
+  #   health-weight: 0.5          # 近期失败率的最大扣减比例
+  #   latency-weight: 0.3         # 延迟子分的最大扣减比例
+  #   load-weight: 0.2            # 并发子分的最大扣减比例（三者之和需 ≤ 1）
+  #   latency-reference-ms: 1500  # 延迟达到该值时子分约 0.5
+  #   concurrency-capacity: 8     # 并发达到该值时子分约 0.5
+  #   ewma-alpha: 0.1             # 延迟 EMA 平滑系数
+  #   error-decay-seconds: 60     # 失败率半衰期（秒）
+  #   error-decay-factor: 0.5     # 每次调用对历史失败率的衰减系数
+  #   cold-start-latency-ratio: 0.5  # 无样本时的延迟子分（不得为 0）
+  #   min-latency-samples: 5      # 低于该样本数按冷启动处理
+  #   exploration-rate: 0.0       # 探索概率，避免流量完全锁定

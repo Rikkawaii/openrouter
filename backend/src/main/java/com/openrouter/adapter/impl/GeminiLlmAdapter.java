@@ -24,6 +24,7 @@ import reactor.core.publisher.SignalType;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -93,8 +94,7 @@ public class GeminiLlmAdapter implements LlmClientAdapter {
                 })
                 .concatWith(Flux.just("[DONE]"))
                 .doOnSubscribe(s -> {
-                    metrics.incrementConcurrent();
-                    metrics.recordCall();
+                    metrics.beginCall(targetModel);
                     // 🧊 最早时机注入：在任何 doFinally 触发之前，model/channelId 已就绪
                     if (ctx != null) {
                         ctx.setModel(targetModel);
@@ -105,11 +105,19 @@ public class GeminiLlmAdapter implements LlmClientAdapter {
                     AtomicBoolean first = new AtomicBoolean(true);
                     AtomicLong lastP = new AtomicLong(0);
                     AtomicLong lastC = new AtomicLong(0);
+                    AtomicReference<Long> ttftMs = new AtomicReference<>(null);
 
                     return flux.doOnNext(item -> {
-                        if (first.compareAndSet(true, false)) {
-                            if (ctx != null)
+                        // 合成的 [DONE] 不是真实首包，不能用来计算首包延迟
+                        if (!"[DONE]".equals(item) && first.compareAndSet(true, false)) {
+                            // 首包延迟：从发出上游请求到第一个真实响应块到达
+                            Long ttft = System.currentTimeMillis() - startTime;
+                            ttftMs.set(ttft);
+                            // 立即写入 ctx：Service 层的收尾（落库/全链路计数）早于本层 doFinally 执行
+                            if (ctx != null) {
+                                ctx.setTtftMs(ttft);
                                 traceLogger.log(ctx, "FIRST_TOKEN", "success", "");
+                            }
                         }
 
                         if (item != null && item.contains("\"usage\":{")) {
@@ -122,6 +130,11 @@ public class GeminiLlmAdapter implements LlmClientAdapter {
                                     metrics.addTokens(targetModel, deltaP, deltaC);
                                     lastP.set(curP);
                                     lastC.set(curC);
+                                    if (ctx != null) {
+                                        ctx.setPromptTokens(curP);
+                                        ctx.setCompletionTokens(curC);
+                                        ctx.setFullResponseJson("{\"usage\":{\"prompt_tokens\":" + curP + ",\"completion_tokens\":" + curC + "}}");
+                                    }
                                 }
                             } catch (Exception ignored) {
                             }
@@ -130,24 +143,18 @@ public class GeminiLlmAdapter implements LlmClientAdapter {
                             .doFinally(sig -> {
                                 long callDuration = System.currentTimeMillis() - startTime;
                                 boolean success = (sig == SignalType.ON_COMPLETE);
-                                // model_call_log：每次底层尝试都记录
-                                usageDatabaseService.saveCallLogAsync(ctx, targetChannelId, targetModel, callDuration, success, sig == SignalType.ON_ERROR ? "Stream error" : null);
+                                Long ttft = ttftMs.get();
+                                // model_call_log：每次底层尝试都记录（首包前失败 ttft 为 NULL）
+                                usageDatabaseService.saveCallLogAsync(ctx, targetChannelId, targetModel, callDuration, success, sig == SignalType.ON_ERROR ? "Stream error" : null, ttft);
 
-                                if (success && ctx != null) {
-                                    // ✅ 此处是 tokens 数据就绪的最早时机
-                                    ctx.setPromptTokens(lastP.get());
-                                    ctx.setCompletionTokens(lastC.get());
-                                    ctx.setFullResponseJson("{\"usage\":{\"prompt_tokens\":" + lastP.get() + ",\"completion_tokens\":" + lastC.get() + "}}");
-                                    metrics.recordModelLatency(callDuration);
-                                    traceLogger.log(ctx, "FULL_RESPONSE", "success",
-                                            "响应完整接收,Token消耗:p=" + lastP.get() + ", c=" + lastC.get());
-                                    // ✅ request_log：在 tokens 确认后立即落库（此时 ctx 完整）
-                                    usageDatabaseService.saveRequestLogAsync(ctx, true, null);
+                                if (success) {
+                                    // request_log / FULL_RESPONSE 由 Service 层统一收尾
+                                    metrics.recordStreamSuccess(targetModel, callDuration, ttft);
                                 }
                             });
                 })
-                .doOnError(e -> metrics.recordError())
-                .doFinally(sig -> metrics.decrementConcurrent());
+                .doOnError(e -> metrics.recordFailure(targetModel, e))
+                .doFinally(sig -> metrics.endCall());
     }
 
     private String convertToGeminiRequest(ChatCompletionRequest request) {

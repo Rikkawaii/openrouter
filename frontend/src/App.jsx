@@ -6,6 +6,7 @@ import Logs from './pages/Logs.jsx'
 import RequestLogs from './pages/RequestLogs.jsx'
 import Settings from './pages/Settings.jsx'
 import BasicSettings from './pages/BasicSettings.jsx'
+import RoutingParams from './pages/RoutingParams.jsx'
 import { api, clearToken, getToken, connectLogStream, disconnectLogStream } from './api.js'
 
 const EMPTY_STATS = {
@@ -48,6 +49,7 @@ export default function App() {
   const [theme, setTheme] = useState(initialTheme)
   const [stats, setStats] = useState(EMPTY_STATS)
   const [channels, setChannels] = useState([])
+  const [routing, setRouting] = useState(null)
   const timerRef = useRef(null)
 
   useEffect(() => {
@@ -72,6 +74,7 @@ export default function App() {
       const res = await api('/api/admin/dashboard')
       setStats(res.globalStats ?? EMPTY_STATS)
       setChannels(res.channels ?? [])
+      setRouting(res.routing ?? null)
     } catch (err) {
       if (err.status === 401) handleUnauthorized()
     }
@@ -106,6 +109,7 @@ export default function App() {
     disconnectLogStream()
     setChannels([])
     setStats(EMPTY_STATS)
+    setRouting(null)
     setIsLoggedIn(false)
   }, [])
 
@@ -123,10 +127,12 @@ export default function App() {
           <RequestLogs onUnauthorized={handleUnauthorized} />
         ) : route === 'basic' ? (
           <BasicSettings onUnauthorized={handleUnauthorized} />
+        ) : route === 'routing' ? (
+          <RoutingParams onUnauthorized={handleUnauthorized} />
         ) : route === 'channels' ? (
           <Settings onUnauthorized={handleUnauthorized} />
         ) : (
-          <Dashboard stats={stats} channels={channels} />
+          <Dashboard stats={stats} channels={channels} routing={routing} />
         )}
       </main>
     </div>

@@ -69,6 +69,8 @@ public class ChannelConfigStore {
         private String adminPassword;
         // 导师规则：全新会话（无上下文）时强制优先指派的模型，空为关闭
         private String mentorModel;
+        // 路由打分参数；为 null 表示尚未在管理页设置过，沿用 application.yaml 的引导值
+        private RoutingConfig routing;
     }
 
     /** 配置文件的顶层结构，与磁盘上的 channels.json 一一对应 */
@@ -115,6 +117,17 @@ public class ChannelConfigStore {
         return v != null ? v : routerProperties.getMentorModel();
     }
 
+    /**
+     * 生效的路由打分参数：settings 段未设置时沿用 application.yaml 的引导值。
+     * 保证永不返回 null，调用方可直接使用。
+     */
+    public RoutingConfig effectiveRouting() {
+        RoutingConfig v = state.getSettings().getRouting();
+        if (v != null) return v;
+        RoutingConfig bootstrap = routerProperties.getRouting();
+        return bootstrap != null ? bootstrap : new RoutingConfig();
+    }
+
     public List<ChannelConfig> getChannels() {
         return state.getChannels();
     }
@@ -158,6 +171,7 @@ public class ChannelConfigStore {
         if (settings.getApiKey() != null) state.getSettings().setApiKey(settings.getApiKey());
         if (settings.getAdminPassword() != null) state.getSettings().setAdminPassword(settings.getAdminPassword());
         if (settings.getMentorModel() != null) state.getSettings().setMentorModel(settings.getMentorModel());
+        if (settings.getRouting() != null) state.getSettings().setRouting(settings.getRouting().copy());
         persist(state);
         applySettings(state.getSettings());
     }
@@ -288,6 +302,7 @@ public class ChannelConfigStore {
         if (s.getApiKey() != null) routerProperties.setApiKey(s.getApiKey());
         if (s.getAdminPassword() != null) routerProperties.setAdminPassword(s.getAdminPassword());
         if (s.getMentorModel() != null) routerProperties.setMentorModel(s.getMentorModel());
+        if (s.getRouting() != null) routerProperties.setRouting(s.getRouting().copy());
     }
 
     private ChannelConfig findById(List<ChannelConfig> channels, String id) {

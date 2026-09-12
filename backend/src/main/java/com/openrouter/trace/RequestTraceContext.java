@@ -53,6 +53,10 @@ public class RequestTraceContext {
     @Setter
     private long completionTokens = 0;
 
+    /** 最终成功尝试的首包延迟 (ms)：仅流式请求有值；非流式与首包前失败为 null */
+    @Setter
+    private Long ttftMs;
+
     /** 最终模型响应 JSON（由 Adapter 在落库前写入） */
     @Setter
     private String fullResponseJson;

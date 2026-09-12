@@ -1,7 +1,8 @@
 package com.openrouter.metrics;
 
+import com.openrouter.config.RouterProperties;
+import com.openrouter.config.RoutingConfig;
 import org.springframework.scheduling.annotation.EnableScheduling;
-import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import java.util.Map;
@@ -9,12 +10,16 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * 唯一的 JVM 全局内存中心。存放并实时同步所有 Model 的监控状态。
- * 并附带调度了非常轻量的“指数健康回血”循环心跳。
+ * 唯一的 JVM 全局内存中心。存放并实时同步所有渠道的监控状态。
+ * <p>
+ * 健康度衰减由 {@link ModelMetrics} 内部按时间惰性完成（半衰期可配），
+ * 因此这里不再需要定时任务；{@code @EnableScheduling} 保留给每日统计等定时作业。
  */
 @Component
 @EnableScheduling
 public class MetricsRegistry {
+
+    private final RouterProperties routerProperties;
 
     private final Map<String, ModelMetrics> metricsMap = new ConcurrentHashMap<>();
 
@@ -23,6 +28,10 @@ public class MetricsRegistry {
     private volatile long globalAvgResponseTime = 0;        // 仅成功请求的平均响应时间 (ms)
     private final AtomicLong globalSuccessCount = new AtomicLong(0); // 仅成功
     private final AtomicLong globalTotalRequests = new AtomicLong(0); // 所有请求 (含失败)
+
+    public MetricsRegistry(RouterProperties routerProperties) {
+        this.routerProperties = routerProperties;
+    }
 
     public void initGlobalStats(long initialAvgResponseTime, long initialSuccessCount, long initialTotalRequests) {
         this.globalAvgResponseTime = initialAvgResponseTime;
@@ -55,23 +64,20 @@ public class MetricsRegistry {
     }
 
     public ModelMetrics getMetrics(String channelId) {
-        return metricsMap.computeIfAbsent(channelId, k -> new ModelMetrics(channelId));
+        return metricsMap.computeIfAbsent(channelId, k -> new ModelMetrics(
+                k,
+                () -> routing().getEwmaAlpha(),
+                () -> routing().getErrorDecaySeconds(),
+                () -> routing().getErrorDecayFactor()));
     }
 
     public Map<String, ModelMetrics> getAllMetrics() {
         return metricsMap;
     }
 
-    /**
-     * Spring 轻松定时任务。
-     * 每 60 秒（60000 毫秒）执行一次。
-     * 强行把所有目前在暗处默默报错的模型的 errorCount 除以 2！
-     * 这完全实现了“只要别一直崩溃，就随着时间让你自然翻篇重来” 的终极自适应逻辑。
-     */
-    @Scheduled(fixedRate = 60000)
-    public void scheduleHealthDecay() {
-        for (ModelMetrics metrics : metricsMap.values()) {
-            metrics.decayErrors();
-        }
+    /** 运行中热更参数后立即生效；配置缺失时回落到默认值 */
+    private RoutingConfig routing() {
+        RoutingConfig cfg = routerProperties.getRouting();
+        return cfg != null ? cfg : new RoutingConfig();
     }
 }

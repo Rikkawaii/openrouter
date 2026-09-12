@@ -153,6 +153,12 @@ export default function BasicSettings({ onUnauthorized }) {
             修改保存后，已登录的会话会立即失效，需要用新密码重新登录。
           </div>
         </div>
+
+        <div className="card stat-card" style={{ lineHeight: 1.8 }}>
+          <p style={{ margin: 0, color: 'var(--text-3)', fontSize: 13 }}>
+            调度打分的权重与阈值已移至「系统配置 → 路由调参」。
+          </p>
+        </div>
       </div>
     </>
   )

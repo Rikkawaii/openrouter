@@ -58,29 +58,67 @@ public class MetricsInitializer implements CommandLineRunner {
             }
         }
 
-        // 2. 恢复调用计数与模型延迟 EMA
+        // 2. 恢复调用计数、错误计数与 (渠道, 模型) 级延迟/首包延迟
+        long modelBuckets = 0;
         for (ChannelConfig channel : channels) {
             // 2.1 调用次数与失败计数
             String callSql = "SELECT COUNT(*) as calls, SUM(CASE WHEN success=0 THEN 1 ELSE 0 END) as err " +
                              "FROM model_call_log WHERE channel_id = ?";
             Map<String, Object> calls = jdbcTemplate.queryForMap(callSql, channel.getId());
             ModelMetrics metrics = metricsRegistry.getMetrics(channel.getId());
-            if (metrics != null) {
-                metrics.recordCalls(parseLongSafely(calls.get("calls")));
-                metrics.recordErrors(parseLongSafely(calls.get("err")));
+            if (metrics == null) continue;
 
-                // 2.2 EMA 延迟预热 (最近 100 条)
-                String durSql = "SELECT AVG(duration_ms) as avg_dur FROM (" +
-                                "SELECT duration_ms FROM model_call_log " +
-                                "WHERE channel_id = ? AND success = 1 " +
-                                "ORDER BY created_at DESC LIMIT 100)";
-                List<Map<String, Object>> res = jdbcTemplate.queryForList(durSql, channel.getId());
-                if (!res.isEmpty() && res.get(0).get("avg_dur") != null) {
-                    metrics.recordModelLatency(((Number) res.get(0).get("avg_dur")).longValue());
+            metrics.recordCalls(parseLongSafely(calls.get("calls")));
+            metrics.recordErrors(parseLongSafely(calls.get("err")));
+
+            // 2.2 按 (渠道, 模型) 取最近 100 条成功尝试，恢复耗时与首包延迟
+            List<Map<String, Object>> perModel = jdbcTemplate.queryForList("""
+                    SELECT model,
+                           AVG(duration_ms) AS avg_dur,
+                           COUNT(*)         AS samples,
+                           AVG(ttft_ms)     AS avg_ttft,
+                           SUM(CASE WHEN ttft_ms IS NOT NULL THEN 1 ELSE 0 END) AS ttft_samples
+                    FROM (
+                        SELECT model, duration_ms, ttft_ms,
+                               ROW_NUMBER() OVER (PARTITION BY model ORDER BY id DESC) AS rn
+                        FROM model_call_log
+                        WHERE channel_id = ? AND success = 1
+                    ) WHERE rn <= 100
+                    GROUP BY model
+                    """, channel.getId());
+
+            long weightedLatencySum = 0;
+            long latencySamples = 0;
+            for (Map<String, Object> row : perModel) {
+                String model = (String) row.get("model");
+                long avgDur = parseLongSafely(row.get("avg_dur"));
+                long samples = parseLongSafely(row.get("samples"));
+                metrics.warmupLatency(model, avgDur, samples);
+                long ttftSamples = parseLongSafely(row.get("ttft_samples"));
+                if (ttftSamples > 0) {
+                    // 历史行为 NULL，不参与均值；只有真正观测到首包的流式样本才预热
+                    metrics.warmupTtft(model, parseLongSafely(row.get("avg_ttft")), ttftSamples);
                 }
+                if (avgDur > 0 && samples > 0) {
+                    weightedLatencySum += avgDur * samples;
+                    latencySamples += samples;
+                }
+                modelBuckets++;
+            }
+            if (latencySamples > 0) {
+                metrics.warmupChannelLatency(weightedLatencySum / latencySamples, latencySamples);
+            }
+
+            // 2.3 恢复 (渠道, 模型) 的尝试次数，与渠道级 totalCalls 保持同口径
+            List<Map<String, Object>> callsByModel = jdbcTemplate.queryForList(
+                    "SELECT model, COUNT(*) AS calls FROM model_call_log WHERE channel_id = ? GROUP BY model",
+                    channel.getId());
+            for (Map<String, Object> row : callsByModel) {
+                metrics.recordModelCalls((String) row.get("model"), parseLongSafely(row.get("calls")));
             }
         }
-        traceLogger.log("INFO", String.format("✅ 各通道健康指标预热完成。累计恢复 Token 消耗: %d", totalTokensRecovered));
+        traceLogger.log("INFO", String.format("✅ 各通道健康指标预热完成。恢复 Token: %d, (渠道,模型) 指标桶: %d",
+                totalTokensRecovered, modelBuckets));
 
         // --- 核心段落 B: 全局大盘初始化 (补录缺失天的归档 + 初始化内存计数器) ---
         traceLogger.log("INFO", "🚀 [2/2] 系统启动：正在同步全局历史概览与大盘计数器...");

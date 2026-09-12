@@ -3,6 +3,7 @@ package com.openrouter.controller;
 import com.openrouter.config.ChannelConfig;
 import com.openrouter.config.ChannelConfigStore;
 import com.openrouter.config.RouterProperties;
+import com.openrouter.config.RoutingConfig;
 import com.openrouter.metrics.MetricsRegistry;
 import com.openrouter.adapter.impl.DynamicModelRoutingStrategy;
 import com.openrouter.metrics.ModelMetrics;
@@ -18,6 +19,7 @@ import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -84,6 +86,8 @@ public class AdminController {
                     .enabled(channel.isEnabled())
                     .baseWeight(channel.getBaseWeight())
                     .avgModelLatencyMs(metrics.getAverageModelLatencyMs())
+                    .latencySamples(metrics.getChannelLatencySamples())
+                    .failureRate(round4(metrics.getFailureRate(null)))
                     .errorCount(metrics.getErrorCount())
                     .currentConcurrentCalls(metrics.getCurrentConcurrentCalls())
                     .totalTokensUsed(metrics.getTotalTokensUsed())
@@ -92,6 +96,7 @@ public class AdminController {
                     .totalCalls(metrics.getTotalCalls())
                     .currentScore(routingStrategy.calculateScore(channel))
                     .tokensByModel(metrics.getTokensByModel())
+                    .modelStats(metrics.getModelViews())
                     .build();
 
             channelViews.add(view);
@@ -117,12 +122,135 @@ public class AdminController {
                 .globalTotalRequests(totalRequests)
                 .globalFailedRequests(failedRequests)
                 .avgResponseTime(metricsRegistry.getGlobalAverageResponseTime())
+                .p95ResponseTime(recentP95())
                 .build();
 
         return DashboardResponse.builder()
                 .globalStats(stats)
                 .channels(channelViews)
+                .routing(configStore.effectiveRouting().copy())
                 .build();
+    }
+
+    // ==================== 分位数查询（观测层以 DB 为准，不读内存 EMA） ====================
+
+    private volatile Long cachedP95 = null;
+    private volatile long cachedP95At = 0;
+
+    /** 实时视图的 P95：统计近 1 小时成功请求；最多 15 秒刷新一次，避免 2 秒轮询把 SQL 打满 */
+    private Long recentP95() {
+        long now = System.currentTimeMillis();
+        Long cached = cachedP95;
+        if (cached != null && now - cachedP95At < 15_000) {
+            return cached;
+        }
+        try {
+            Long value = computeP95("created_at >= datetime('now','localtime','-1 hour')");
+            cachedP95 = value;
+            cachedP95At = now;
+            return value;
+        } catch (Exception e) {
+            log.warn("计算实时 P95 失败: {}", e.getMessage());
+            return cached;
+        }
+    }
+
+    /** 按条件统计成功请求的全链路延迟 P95 */
+    private Long computeP95(String whereClause, Object... args) {
+        String sql = "SELECT total_duration_ms FROM request_log " +
+                "WHERE success = 1 AND " + whereClause + " ORDER BY total_duration_ms";
+        List<Long> values = jdbcTemplate.queryForList(sql, Long.class, args);
+        return percentile(values, 0.95);
+    }
+
+    /** 最近秩法分位数：list 必须已升序排列 */
+    private static Long percentile(List<Long> sorted, double p) {
+        if (sorted == null || sorted.isEmpty()) return null;
+        int idx = (int) Math.ceil(p * sorted.size()) - 1;
+        return sorted.get(Math.max(0, Math.min(sorted.size() - 1, idx)));
+    }
+
+    /**
+     * 模型维度的渠道对比：同一模型在各渠道的尝试延迟与首包延迟分位数。
+     * 数据全部来自 model_call_log 的独立列（ttft_ms），不解析 trace_events。
+     */
+    @GetMapping("/model-comparison")
+    public Mono<ModelComparisonResponse> getModelComparison(@RequestParam String model,
+            @RequestParam(defaultValue = "24") int hours) {
+        return Mono.fromCallable(() -> {
+            int h = Math.max(1, Math.min(hours, 24 * 30));
+            String window = "-" + h + " hours";
+
+            List<Map<String, Object>> latencyRows = jdbcTemplate.queryForList("""
+                    WITH ranked AS (
+                        SELECT channel_id, duration_ms,
+                               ROW_NUMBER() OVER (PARTITION BY channel_id ORDER BY duration_ms) AS rn,
+                               COUNT(*)    OVER (PARTITION BY channel_id)                      AS n
+                        FROM model_call_log
+                        WHERE model = ? AND success = 1 AND created_at >= datetime('now','localtime', ?)
+                    )
+                    SELECT channel_id, MAX(n) AS samples,
+                           MIN(CASE WHEN rn * 100 >= n * 50 THEN duration_ms END) AS p50,
+                           MIN(CASE WHEN rn * 100 >= n * 95 THEN duration_ms END) AS p95
+                    FROM ranked GROUP BY channel_id
+                    """, model, window);
+
+            List<Map<String, Object>> ttftRows = jdbcTemplate.queryForList("""
+                    WITH ranked AS (
+                        SELECT channel_id, ttft_ms,
+                               ROW_NUMBER() OVER (PARTITION BY channel_id ORDER BY ttft_ms) AS rn,
+                               COUNT(*)    OVER (PARTITION BY channel_id)                    AS n
+                        FROM model_call_log
+                        WHERE model = ? AND success = 1 AND ttft_ms IS NOT NULL
+                          AND created_at >= datetime('now','localtime', ?)
+                    )
+                    SELECT channel_id, MAX(n) AS samples,
+                           MIN(CASE WHEN rn * 100 >= n * 50 THEN ttft_ms END) AS p50,
+                           MIN(CASE WHEN rn * 100 >= n * 95 THEN ttft_ms END) AS p95
+                    FROM ranked GROUP BY channel_id
+                    """, model, window);
+
+            Map<String, Map<String, Object>> ttftByChannel = new HashMap<>();
+            for (Map<String, Object> row : ttftRows) {
+                ttftByChannel.put(String.valueOf(row.get("channel_id")), row);
+            }
+
+            List<ModelChannelStat> stats = new ArrayList<>();
+            for (Map<String, Object> row : latencyRows) {
+                String channelId = String.valueOf(row.get("channel_id"));
+                Map<String, Object> t = ttftByChannel.get(channelId);
+                stats.add(ModelChannelStat.builder()
+                        .channelId(channelId)
+                        .latencySamples(parseLongSafely(row.get("samples")))
+                        .latencyP50Ms(parseNullableLong(row.get("p50")))
+                        .latencyP95Ms(parseNullableLong(row.get("p95")))
+                        .ttftSamples(t == null ? 0 : parseLongSafely(t.get("samples")))
+                        .ttftP50Ms(t == null ? null : parseNullableLong(t.get("p50")))
+                        .ttftP95Ms(t == null ? null : parseNullableLong(t.get("p95")))
+                        .build());
+            }
+
+            return ModelComparisonResponse.builder()
+                    .model(model)
+                    .hours(h)
+                    .minSamples(configStore.effectiveRouting().getMinLatencySamples())
+                    .channels(stats)
+                    .build();
+        }).subscribeOn(Schedulers.boundedElastic());
+    }
+
+    private static double round4(double v) {
+        return Math.round(v * 10000.0) / 10000.0;
+    }
+
+    private Long parseNullableLong(Object val) {
+        if (val == null) return null;
+        if (val instanceof Number n) return n.longValue();
+        try {
+            return Long.parseLong(val.toString());
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     // ==================== 渠道/模型配置（channels.json 全量读写） ====================
@@ -236,6 +364,15 @@ public class AdminController {
 
         out.setMentorModel(submitted.getMentorModel() != null ? submitted.getMentorModel().trim() : cur.getMentorModel());
 
+        // 路由参数：未提交则沿用当前生效值；提交则先校验再落盘
+        RoutingConfig routing = submitted.getRouting();
+        if (routing == null) {
+            routing = configStore.effectiveRouting();
+        } else {
+            routing.validate();
+        }
+        out.setRouting(routing.copy());
+
         if (Boolean.TRUE.equals(out.getApiKeyEnabled())
                 && (out.getApiKey() == null || out.getApiKey().isBlank())) {
             throw new IllegalArgumentException("已启用 API Key 鉴权，请填写密钥，或选择「无需 key」");
@@ -253,6 +390,7 @@ public class AdminController {
         masked.setApiKey(maskApiKey(configStore.effectiveApiKey()));
         masked.setAdminPassword(maskApiKey(configStore.effectiveAdminPassword()));
         masked.setMentorModel(configStore.effectiveMentorModel());
+        masked.setRouting(configStore.effectiveRouting().copy());
         return masked;
     }
 
@@ -352,6 +490,7 @@ public class AdminController {
                     .globalPromptTokens(accumulator.promptTokens)
                     .globalCompletionTokens(accumulator.completionTokens)
                     .avgResponseTime(accumulator.getFinalAvg())
+                    .p95ResponseTime(computeP95("created_at BETWEEN ? AND ?", startStr, endStr))
                     .totalChannels(channels.size())
                     .activeChannels((int) channels.stream().filter(ChannelConfig::isEnabled).count())
                     .build();
@@ -439,6 +578,8 @@ public class AdminController {
     public static class DashboardResponse {
         private GlobalStats globalStats;
         private List<ChannelView> channels;
+        /** 当前生效的路由打分参数，供前端展示公式与口径 */
+        private RoutingConfig routing;
     }
 
     @Data
@@ -452,6 +593,8 @@ public class AdminController {
         private long globalTotalRequests;
         private long globalFailedRequests;
         private long avgResponseTime;
+        /** 成功请求全链路延迟的 P95（ms）；无成功样本时为 null */
+        private Long p95ResponseTime;
     }
 
     @Data
@@ -463,7 +606,11 @@ public class AdminController {
         private String models;
         private boolean enabled;
         private int baseWeight;
+        /** 渠道级延迟（所有模型汇总），仅作诊断参考 */
         private long avgModelLatencyMs;
+        private long latencySamples;
+        /** 渠道级近期失败率 [0,1] */
+        private double failureRate;
         private long errorCount;
         private long currentConcurrentCalls;
         private long totalTokensUsed;
@@ -472,5 +619,30 @@ public class AdminController {
         private long totalCalls;
         private double currentScore;
         private Map<String, ModelMetrics.TokenPairView> tokensByModel;
+        /** (渠道, 模型) 级指标明细 */
+        private List<ModelMetrics.ModelStateView> modelStats;
+    }
+
+    @Data
+    @Builder
+    public static class ModelComparisonResponse {
+        private String model;
+        private int hours;
+        /** 样本数低于该值时应视为「样本不足」 */
+        private int minSamples;
+        private List<ModelChannelStat> channels;
+    }
+
+    @Data
+    @Builder
+    public static class ModelChannelStat {
+        private String channelId;
+        private long latencySamples;
+        private Long latencyP50Ms;
+        private Long latencyP95Ms;
+        /** 首包延迟样本数；0 表示该渠道近期没有流式成功请求 */
+        private long ttftSamples;
+        private Long ttftP50Ms;
+        private Long ttftP95Ms;
     }
 }

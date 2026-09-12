@@ -55,17 +55,14 @@ public class LlmRouterService {
 
     public Mono<ChatCompletionResponse> chat(ChatCompletionRequest request) {
         RequestTraceContext ctx = request.getTraceContext();
+        AtomicReference<String> errorMsg = new AtomicReference<>(null);
         return chatWithFallback(request, new HashSet<>())
                 .doOnError(e -> {
                     // 非流式错误记录已经在 chatWithFallback 的 onErrorResume 里记入 trace 了
+                    errorMsg.set(e.getMessage());
                 })
-                .doFinally(sig -> {
-                    boolean success = sig == reactor.core.publisher.SignalType.ON_COMPLETE;
-                    usageDatabaseService.saveRequestLogAsync(ctx, success, null);
-                    if (ctx != null) {
-                        metricsRegistry.recordGlobalResponse(ctx.getTotalDurationMs(), success);
-                    }
-                });
+                .doFinally(sig -> finalizeRequest(ctx,
+                        sig == reactor.core.publisher.SignalType.ON_COMPLETE, errorMsg.get()));
     }
 
     public Flux<String> streamChat(ChatCompletionRequest request) {
@@ -73,17 +70,29 @@ public class LlmRouterService {
         AtomicReference<String> errorMsg = new AtomicReference<>(null);
         return streamChatWithFallback(request, new HashSet<>())
                 .doOnError(e -> errorMsg.set(e.getMessage()))
-                .doFinally(sig -> {
-                    boolean success = sig == reactor.core.publisher.SignalType.ON_COMPLETE;
-                    if (ctx != null) {
-                        metricsRegistry.recordGlobalResponse(ctx.getTotalDurationMs(), success);
-                    }
-                    // ✅ 成功时 request_log 已由 Adapter 内层 doFinally 落库（tokens 就绪）
-                    // ❌ 失败时兑底写入 error 记录
-                    if (!success) {
-                        usageDatabaseService.saveRequestLogAsync(ctx, false, errorMsg.get());
-                    }
-                });
+                .doFinally(sig -> finalizeRequest(ctx,
+                        sig == reactor.core.publisher.SignalType.ON_COMPLETE, errorMsg.get()));
+    }
+
+    /**
+     * 请求收尾：
+     * <ul>
+     *   <li>只取一次总耗时，同时用于全链路计数与 request_log 落库，保证两个口径来自同一时间点；</li>
+     *   <li>FULL_RESPONSE 事件与 request_log 统一在此记录/落库。
+     *       注意 Reactor 的 doFinally 是「先向下游传播终止信号、再执行回调」，
+     *       嵌套时下游回调先执行，因此这里必须晚于 Adapter 的 doFinally，
+     *       所有 ctx 字段（tokens/ttft）都已在 onNext 阶段填充完毕。</li>
+     * </ul>
+     */
+    private void finalizeRequest(RequestTraceContext ctx, boolean success, String errorMsg) {
+        if (ctx == null) return;
+        long totalDurationMs = ctx.getTotalDurationMs();
+        if (success) {
+            traceLogger.log(ctx, "FULL_RESPONSE", "success",
+                    "响应完整接收,Token消耗:p=" + ctx.getPromptTokens() + ", c=" + ctx.getCompletionTokens());
+        }
+        metricsRegistry.recordGlobalResponse(totalDurationMs, success);
+        usageDatabaseService.saveRequestLogAsync(ctx, success, success ? null : errorMsg, totalDurationMs);
     }
 
     // ==================== 带自动故障转移的核心执行方法 ====================

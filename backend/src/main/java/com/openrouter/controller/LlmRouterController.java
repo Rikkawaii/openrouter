@@ -59,7 +59,7 @@ public class LlmRouterController {
 //                        java.util.Map.of("role", last.getRole() != null ? last.getRole() : "",
 //                                "content", last.getContent() != null ? last.getContent().toString() : "")));
                 ctx.setFullRequestJson(objectMapper.writeValueAsString(request));
-            }
+        }
         } catch (Exception ignored) {
         }
         request.setTraceContext(ctx);

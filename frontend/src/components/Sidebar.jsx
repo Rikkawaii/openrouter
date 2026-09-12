@@ -11,6 +11,7 @@ import {
   IconSliders,
   IconSun,
   IconTerminal,
+  IconZap,
 } from './icons.jsx'
 
 const NAV_GROUPS = [
@@ -30,6 +31,7 @@ const SETTINGS_GROUP = {
   children: [
     { key: 'basic', label: '基础设置', icon: IconLock },
     { key: 'channels', label: '渠道与模型', icon: IconSliders },
+    { key: 'routing', label: '路由调参', icon: IconZap },
   ],
 }
 
