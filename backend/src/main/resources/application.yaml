@@ -1,0 +1,19 @@
+server:
+  port: 10086
+
+spring:
+  codec:
+    max-in-memory-size: 50MB
+  datasource:
+    url: jdbc:sqlite:backend/openrouter.db
+    driver-class-name: org.sqlite.JDBC
+
+openrouter:
+  # 管理页面登录密码（仅作为首次部署的引导值；此后可在管理页「基础设置」中修改，
+  # 修改后会写入 backend/config/channels.json 并以那边的值为准）
+  admin-password: "Initial value"
+
+  # 渠道、模型与网关鉴权等运行配置见 backend/config/channels.json，
+  # 或在管理页「基础设置」「渠道与模型」中调整，保存后热生效。
+  # 可选：配置文件路径，默认 backend/config/channels.json
+  # config-file: backend/config/channels.json

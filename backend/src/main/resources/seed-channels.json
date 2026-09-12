@@ -1,0 +1,23 @@
+{
+  "channels": [
+    {
+      "id": "example",
+      "type": "openai",
+      "baseUrl": "https://api.example.com",
+      "apiKey": "sk-your-api-key",
+      "baseWeight": 100,
+      "enabled": true
+    }
+  ],
+  "models": [
+    {
+      "name": "gpt-4o-mini",
+      "channels": ["example"],
+      "capabilities": {
+        "vision": true,
+        "functionCalling": true,
+        "longContext": false
+      }
+    }
+  ]
+}
